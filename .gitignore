@@ -1,0 +1,29 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# build output
+dist/
+.next/
+out/
+*.tsbuildinfo
+
+# environment — NEVER commit a real key, testnet or otherwise
+.env
+.env.*
+!.env.example
+
+# local data
+*.db
+*.db-journal
+*.sqlite
+data/
+
+# editor / OS
+.DS_Store
+.vscode/
+.idea/
+
+# misc
+coverage/
+.vercel/

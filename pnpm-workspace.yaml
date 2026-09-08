@@ -1,0 +1,7 @@
+packages:
+  - "packages/*"
+  - "apps/*"
+
+# esbuild ships its platform binary via a postinstall; tsup + vitest need it.
+onlyBuiltDependencies:
+  - esbuild
