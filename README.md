@@ -29,7 +29,10 @@ widget, bot and agent import these and never build their own calls.
 | Factory `AuctionCreated` event | [`packages/sdk/src/discover.ts:19`](packages/sdk/src/discover.ts#L19) (event) and [`:67-136`](packages/sdk/src/discover.ts#L67-L136) (`scanAuctions`) |
 | Live `AuctionCreated` watching | [`packages/sdk/src/discover.ts:138-163`](packages/sdk/src/discover.ts#L138-L163) - `watchAuctions()` |
 | Auction view functions | [`packages/sdk/src/read.ts:108-157`](packages/sdk/src/read.ts#L108-L157) - `getAuctionInfo()`, `getClearingPrice()`, `isGraduated()` |
-| `submitBid` encoding | [`packages/sdk/src/write.ts:88-122`](packages/sdk/src/write.ts#L88-L122) - `encodeSubmitBid()` |
+| `submitBid` encoding | [`packages/sdk/src/write.ts`](packages/sdk/src/write.ts) - `encodeSubmitBid()` |
+| ERC-20 bid approvals (Permit2) | [`packages/sdk/src/write.ts`](packages/sdk/src/write.ts) - `encodeApproveErc20ToPermit2()`, `encodeApprovePermit2()` |
+| Tick hint for `submitBid` | [`packages/sdk/src/write.ts`](packages/sdk/src/write.ts) - `getPrevTickHint()` |
+| `submitBid` from the agent | [`apps/bidding-agent/src/agent.ts`](apps/bidding-agent/src/agent.ts) |
 | `submitBid` from the widget | [`packages/widget/src/AuctionCard.tsx:160-176`](packages/widget/src/AuctionCard.tsx#L160-L176) |
 | Cheap batched list reads | [`packages/sdk/src/read.ts`](packages/sdk/src/read.ts) - `getAuctionListStates()` |
 
@@ -122,7 +125,10 @@ cp .env.example .env   # then fill in RPC URL, factory address, etc.
 | `pnpm sync:auctions` | Scan `AuctionCreated` into the local store, then cache each auction's config |
 | `pnpm sync:auctions -- --full --passes 3` | Re-scan everything, unioning passes to converge on a flaky RPC |
 | `pnpm demo:embed` | Build the vanilla widget bundle into the web app's `public/` |
-| `pnpm agent` | Bidding agent |
+| `pnpm agent` | Bidding agent (broadcasts only if `AGENT_BROADCAST=true`) |
+| `pnpm agent -- --simulate` | Drive the real strategy through a scripted price walk |
+| `pnpm agent -- --plan` | Build and print the real bid transactions; never sends |
+| `pnpm agent -- --dry-run --once` | One real decision cycle against live state; never sends |
 
 Workspace packages are consumed as TypeScript source (Next `transpilePackages`, `tsx` for the Node apps), so there is no build step to run before the apps.
 
@@ -155,6 +161,47 @@ zero-live case renders as an explanatory line instead of an empty screen, and
 labelled "supply schedule released", never "% sold" - an auction that closes
 with no bids still reaches 100%.
 
+## The bidding agent
+
+`apps/bidding-agent` watches one auction and bids when the clearing price comes
+within a configured band of the operator's price cap.
+
+**Guardrails**, all failing closed:
+
+- **Testnet only.** Mainnet chain ids are absent from the allowlist rather than
+  blocked by a condition. The chain is checked twice - the configured id, and
+  the id the RPC actually reports - so a mainnet endpoint behind a testnet
+  `BEACON_CHAIN_ID` is rejected, not trusted.
+- **Hard max-spend cap**, enforced by the strategy and re-checked immediately
+  before every send.
+- **Bid count limit**, independent of the budget.
+- **The private key is read only from `.env`**, validated by shape, and
+  converted straight to a viem account. Only the derived address is ever logged.
+- **Broadcasting is opt-in**: `AGENT_BROADCAST=true`, and `--dry-run` / `--plan`
+  always override it.
+
+**Rounding direction matters here.** The price cap is parsed with the SDK's
+`decimalToQ96`, which truncates toward zero, so the effective ceiling is never
+above what the operator typed. The trigger threshold also truncates down, which
+can only make the agent bid *earlier*, never at a higher price - and the price
+it submits is always the cap itself, so an early trigger cannot overpay. These
+directions are asserted in `apps/bidding-agent/test/strategy.test.ts`.
+
+### ERC-20 bids go through Permit2
+
+This is the single easiest thing to get wrong. `ContinuousClearingAuction`
+pulls a non-native bid currency with `SafeTransferLib.permit2TransferFrom`,
+which calls Permit2's `transferFrom(from,to,uint160,token)` (`0x36c78516`).
+**Approving the auction directly does nothing** - the auction never calls
+`token.transferFrom`. A bidder needs two approvals:
+
+1. `ERC20.approve(0x000000000022D473030F116dDEE9F6B43aC78BA3, amount)`
+2. `Permit2.approve(token, auction, amount, expiration)`
+
+`buildBidTransactions()` emits exactly the steps still outstanding - one
+transaction for a native auction, up to three for an ERC-20 one - and both the
+widget and the agent use it, so neither can drift from the other.
+
 ## Safety
 
 **Testnet only.** No mainnet transactions anywhere in this repo. `.env` is gitignored; `.env.example` holds placeholders only. The bidding agent additionally enforces a chain-id allowlist and a hard max-spend cap.
@@ -165,7 +212,7 @@ with no bids still reaches 100%.
 - [x] Phase 1 — SDK read side
 - [x] Phase 2 — Telegram alert bot
 - [x] Phase 3 — web directory + widget
-- [ ] Phase 4 — bidding agent (write side)
+- [x] Phase 4 — bidding agent (write side)
 - [ ] Phase 5 — demo auction
 - [ ] Phase 6 — submission polish
 

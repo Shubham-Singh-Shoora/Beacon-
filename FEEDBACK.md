@@ -54,9 +54,32 @@ with no deployment, no funded wallet and no setup. Given that no lens address is
 published, suggesting this pattern in the docs would remove the single biggest
 onboarding blocker we hit.
 
+## Phase 4: the write path
+
+**7. `submitBid` pulling ERC-20 currency through Permit2 is undocumented and is
+the biggest integration trap in the protocol.**
+`submitBid` calls `SafeTransferLib.permit2TransferFrom` for any non-native
+currency. Nothing in the NatSpec on `submitBid` mentions Permit2, so the
+obvious integration - approve the auction, then bid - compiles, reads fine, and
+reverts with an opaque `TransferFromFailed()`. We only found it by reading the
+implementation. One line on `submitBid` saying "ERC-20 bids require a Permit2
+allowance, not an ERC-20 approval to this contract" would save every integrator
+the same debugging session.
+
+**8. The `prevTickPrice` hint has no documented way to compute it.**
+The parameter is described as "the previous tick price", and the no-hint
+overload is documented as gas-expensive, but nothing explains how an off-chain
+caller should derive a good hint. Reading the source shows the no-hint overload
+simply passes `FLOOR_PRICE`, which is a useful thing to know: it means the hint
+is purely a search optimisation and a conservative value is always safe. A
+NatSpec line saying that would let integrators reason about it instead of
+guessing.
+
+**9. Minor: `submitBid` overload selection is easy to get wrong from a
+TypeScript ABI.** The four- and five-argument overloads differ only in arity, so
+an encoder picks between them by argument count. That is fine once you know, but
+worth a note.
+
 ## Later phases
 
-- _(Phase 2)_ -
-- _(Phase 3)_ -
-- _(Phase 4)_ -
 - _(Phase 5)_ -

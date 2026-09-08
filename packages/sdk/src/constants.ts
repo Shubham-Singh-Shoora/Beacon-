@@ -65,3 +65,14 @@ export const DEFAULT_LOG_CHUNK_SIZE = 50_000n;
 
 /** `address(0)` - the currency sentinel meaning native ETH. */
 export const NATIVE_CURRENCY: Address = "0x0000000000000000000000000000000000000000";
+
+/**
+ * Canonical Permit2, deployed at the same address on every chain.
+ *
+ * ERC-20 bids do NOT approve the auction. `ContinuousClearingAuction.submitBid`
+ * pulls the bid currency with `SafeTransferLib.permit2TransferFrom`, which
+ * calls Permit2's `transferFrom(from,to,uint160,token)`. A bidder therefore
+ * needs an ERC-20 approval to THIS address, plus a Permit2 allowance naming the
+ * auction as spender. Matches solady's `SafeTransferLib.PERMIT2`.
+ */
+export const PERMIT2_ADDRESS: Address = "0x000000000022D473030F116dDEE9F6B43aC78BA3";

@@ -1,10 +1,10 @@
 import { useMemo, useState } from "react";
 import {
+  buildBidTransactions,
   checkBidReadiness,
   decimalToQ96,
   describeBidBlocker,
-  encodeApprove,
-  encodeSubmitBid,
+  getPrevTickHint,
   formatQ96,
   formatQ96Compact,
   formatTokenAmount,
@@ -143,37 +143,35 @@ export function AuctionCard(props: AuctionCardProps) {
         return;
       }
 
-      // ERC-20 bid currencies must approve the auction before it can pull funds.
-      if (readiness.needsApproval) {
-        setTx({ kind: "working", message: `Approving ${data.currency.symbol}…` });
-        const approval = encodeApprove(data.info.currency, props.auction);
-        const approvalHash = await wallet.walletClient.sendTransaction({
-          account: wallet.address,
-          chain: client.chain,
-          to: approval.to,
-          data: approval.data,
-          value: approval.value,
-        });
-        await client.publicClient.waitForTransactionReceipt({ hash: approvalHash });
-      }
+      // ERC-20 bids go through Permit2, so there may be two approvals before
+      // the bid itself. buildBidTransactions returns exactly the steps needed.
+      const prevTickPriceQ96 = await getPrevTickHint(client, props.auction, parsed.maxPriceQ96);
 
-      setTx({ kind: "working", message: "Submitting bid…" });
-
-      const request = encodeSubmitBid({
+      const steps = buildBidTransactions({
         auction: props.auction,
+        currency: data.info.currency,
         maxPriceQ96: parsed.maxPriceQ96,
         amount: parsed.amountUnits,
         owner: wallet.address,
-        isNativeCurrency: data.currency.isNative,
+        readiness,
+        prevTickPriceQ96,
       });
 
-      const hash = await wallet.walletClient.sendTransaction({
-        account: wallet.address,
-        chain: client.chain,
-        to: request.to,
-        data: request.data,
-        value: request.value,
-      });
+      let hash = "" as `0x${string}`;
+      for (const [index, step] of steps.entries()) {
+        setTx({ kind: "working", message: `${step.label} (${index + 1}/${steps.length})…` });
+        hash = await wallet.walletClient.sendTransaction({
+          account: wallet.address,
+          chain: client.chain,
+          to: step.request.to,
+          data: step.request.data,
+          value: step.request.value,
+        });
+        // Approvals must land before the next step can read them.
+        if (index < steps.length - 1) {
+          await client.publicClient.waitForTransactionReceipt({ hash });
+        }
+      }
 
       setTx({ kind: "sent", hash });
       refresh();

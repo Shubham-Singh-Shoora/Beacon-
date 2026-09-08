@@ -1,30 +1,38 @@
 /**
  * The write path: building a `submitBid` transaction.
  *
- * Scope note. This module builds and encodes bids, and understands the two
- * things that make a CCA bid different from an ordinary transfer:
+ * Three things here are easy to get wrong, and all three are verified against
+ * the v1.1.0 contract source rather than assumed:
  *
- * 1. The bid currency is often an ERC-20, not native ETH, so a bid may need an
- *    `approve` first and must NOT send `value`.
- * 2. `submitBid` has two overloads. The five-argument form takes a
- *    `prevTickPrice` hint; the four-argument form finds the tick itself by
- *    walking from the floor price, which is correct but costs far more gas.
+ * 1. ERC-20 bids go through PERMIT2, not a plain `transferFrom`.
+ *    `ContinuousClearingAuction.submitBid` calls
+ *    `SafeTransferLib.permit2TransferFrom(...)` unconditionally for a
+ *    non-native currency, which invokes Permit2's
+ *    `transferFrom(from,to,uint160,token)`. Approving the AUCTION directly does
+ *    nothing - the auction never calls `token.transferFrom`. A bidder needs
+ *    BOTH an ERC-20 approval to Permit2 AND a Permit2 allowance for the
+ *    auction as spender.
  *
- * Today this uses the no-hint overload, which is always safe. Phase 4 adds the
- * tick-hint lookup for the bidding agent, where gas actually matters.
+ * 2. Native bids must send `msg.value == amount` exactly, and must send zero
+ *    value for ERC-20 currencies (`if (msg.value != 0) revert
+ *    CurrencyIsNotNative()`).
+ *
+ * 3. `prevTickPrice` is a search hint, not a price the bidder pays. The
+ *    four-argument overload is literally
+ *    `submitBid(maxPrice, amount, owner, FLOOR_PRICE, hookData)` - always
+ *    correct, but it walks every tick from the floor.
  *
  * Nothing here broadcasts. These helpers return request objects for a caller's
- * wallet client (the widget) or wallet-bearing agent (Phase 4) to send, which
- * keeps signing concerns out of the SDK.
+ * wallet client to send, which keeps signing concerns out of the SDK.
  */
 import { encodeFunctionData, maxUint256 } from "viem";
 import type { Address, Hex } from "viem";
 import { auctionAbi } from "./abis";
 import type { BeaconClient } from "./client";
-import { NATIVE_CURRENCY } from "./constants";
+import { NATIVE_CURRENCY, PERMIT2_ADDRESS } from "./constants";
 import { erc20MetadataAbi } from "./erc20";
 
-/** Minimal ERC-20 approval surface, needed when the bid currency is a token. */
+/** ERC-20 approval + balance surface. */
 export const erc20ApprovalAbi = [
   ...erc20MetadataAbi,
   {
@@ -56,19 +64,40 @@ export const erc20ApprovalAbi = [
   },
 ] as const;
 
-export interface SubmitBidParams {
-  auction: Address;
-  /** Highest price the bidder will pay, Q96-encoded. Use `decimalToQ96`. */
-  maxPriceQ96: bigint;
-  /** Bid size, in the currency's smallest unit. uint128 on-chain. */
-  amount: bigint;
-  /** Who owns the resulting bid. Usually the connected wallet. */
-  owner: Address;
-  /** Extra data for a validation hook, if the auction has one. */
-  hookData?: Hex;
-  /** True when the auction's currency is native ETH, so `value` must be sent. */
-  isNativeCurrency: boolean;
-}
+/** Permit2 AllowanceTransfer, the second half of the ERC-20 approval flow. */
+export const permit2Abi = [
+  {
+    type: "function",
+    name: "allowance",
+    inputs: [
+      { name: "user", type: "address" },
+      { name: "token", type: "address" },
+      { name: "spender", type: "address" },
+    ],
+    outputs: [
+      { name: "amount", type: "uint160" },
+      { name: "expiration", type: "uint48" },
+      { name: "nonce", type: "uint48" },
+    ],
+    stateMutability: "view",
+  },
+  {
+    type: "function",
+    name: "approve",
+    inputs: [
+      { name: "token", type: "address" },
+      { name: "spender", type: "address" },
+      { name: "amount", type: "uint160" },
+      { name: "expiration", type: "uint48" },
+    ],
+    outputs: [],
+    stateMutability: "nonpayable",
+  },
+] as const;
+
+const UINT128_MAX = 2n ** 128n - 1n;
+const UINT160_MAX = 2n ** 160n - 1n;
+const UINT48_MAX = 2n ** 48n - 1n;
 
 export interface TransactionRequest {
   to: Address;
@@ -76,12 +105,30 @@ export interface TransactionRequest {
   value: bigint;
 }
 
-const UINT128_MAX = 2n ** 128n - 1n;
+export interface SubmitBidParams {
+  auction: Address;
+  /** Highest price the bidder will pay, Q96-encoded. Use `decimalToQ96`. */
+  maxPriceQ96: bigint;
+  /** Bid size, in the currency's smallest unit. uint128 on-chain. */
+  amount: bigint;
+  /** Who owns the resulting bid. */
+  owner: Address;
+  /** Extra data for a validation hook, if the auction has one. */
+  hookData?: Hex;
+  /** True when the auction's currency is native ETH, so `value` must be sent. */
+  isNativeCurrency: boolean;
+  /**
+   * Search hint: the initialised tick at or below `maxPriceQ96`. Omit to use
+   * the floor price, which is always correct but costs more gas.
+   * See {@link getPrevTickHint}.
+   */
+  prevTickPriceQ96?: bigint;
+}
 
 /**
  * Encode a `submitBid` call.
  *
- * @throws RangeError if `amount` does not fit the contract's `uint128`.
+ * @throws RangeError if the amount does not fit the contract's `uint128`.
  */
 export function encodeSubmitBid(params: SubmitBidParams): TransactionRequest {
   if (params.amount <= 0n) {
@@ -94,25 +141,68 @@ export function encodeSubmitBid(params: SubmitBidParams): TransactionRequest {
     throw new RangeError(`submitBid: maxPriceQ96 must be positive, got ${params.maxPriceQ96}`);
   }
 
-  const data = encodeFunctionData({
-    abi: auctionAbi,
-    functionName: "submitBid",
-    // Four arguments selects the no-hint overload.
-    args: [params.maxPriceQ96, params.amount, params.owner, params.hookData ?? "0x"],
-  });
+  const data =
+    params.prevTickPriceQ96 === undefined
+      ? encodeFunctionData({
+          abi: auctionAbi,
+          functionName: "submitBid",
+          // Four args selects the no-hint overload, which passes FLOOR_PRICE.
+          args: [params.maxPriceQ96, params.amount, params.owner, params.hookData ?? "0x"],
+        })
+      : encodeFunctionData({
+          abi: auctionAbi,
+          functionName: "submitBid",
+          args: [
+            params.maxPriceQ96,
+            params.amount,
+            params.owner,
+            params.prevTickPriceQ96,
+            params.hookData ?? "0x",
+          ],
+        });
 
   return {
     to: params.auction,
     data,
-    // ERC-20 bids are pulled via transferFrom; sending value would strand ETH.
+    // ERC-20 bids are pulled via Permit2; any value sent would revert with
+    // CurrencyIsNotNative().
     value: params.isNativeCurrency ? params.amount : 0n,
   };
 }
 
-/** Encode an ERC-20 `approve` for the auction to pull the bid currency. */
-export function encodeApprove(
-  currency: Address,
+/**
+ * Look up a `prevTickPrice` hint.
+ *
+ * The auction inserts a bid by walking initialised ticks upward from this
+ * price. `nextActiveTickPrice()` is the next initialised tick above the current
+ * clearing price, so it is a strictly better starting point than the floor
+ * whenever the bid sits above it. Anything at or above `maxPrice` would make
+ * the contract search past the target, so those fall back to the floor.
+ *
+ * A wrong hint cannot make a bid execute at a different price - it only affects
+ * how far the contract searches - but a hint above the target reverts, so this
+ * is deliberately conservative.
+ */
+export async function getPrevTickHint(
+  client: BeaconClient,
   auction: Address,
+  maxPriceQ96: bigint,
+): Promise<bigint> {
+  const [floorPrice, nextActive] = await client.publicClient.multicall({
+    allowFailure: false,
+    contracts: [
+      { address: auction, abi: auctionAbi, functionName: "floorPrice" },
+      { address: auction, abi: auctionAbi, functionName: "nextActiveTickPrice" },
+    ],
+  });
+
+  if (nextActive > floorPrice && nextActive < maxPriceQ96) return nextActive;
+  return floorPrice;
+}
+
+/** Approve Permit2 to move the bid currency. Step 1 of 2 for ERC-20 bids. */
+export function encodeApproveErc20ToPermit2(
+  currency: Address,
   amount: bigint = maxUint256,
 ): TransactionRequest {
   return {
@@ -120,7 +210,38 @@ export function encodeApprove(
     data: encodeFunctionData({
       abi: erc20ApprovalAbi,
       functionName: "approve",
-      args: [auction, amount],
+      args: [PERMIT2_ADDRESS, amount],
+    }),
+    value: 0n,
+  };
+}
+
+/**
+ * Grant the auction a Permit2 allowance. Step 2 of 2 for ERC-20 bids.
+ *
+ * @param expiration Unix seconds. Defaults to 30 days out; Permit2 stores this
+ *   as a uint48, and an expired allowance fails at transfer time.
+ */
+export function encodeApprovePermit2(
+  currency: Address,
+  auction: Address,
+  amount: bigint = UINT160_MAX,
+  expiration?: bigint,
+): TransactionRequest {
+  if (amount > UINT160_MAX) {
+    throw new RangeError(`Permit2 approve: amount ${amount} exceeds uint160.`);
+  }
+  const expiry = expiration ?? BigInt(Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60);
+  if (expiry > UINT48_MAX) {
+    throw new RangeError(`Permit2 approve: expiration ${expiry} exceeds uint48.`);
+  }
+
+  return {
+    to: PERMIT2_ADDRESS,
+    data: encodeFunctionData({
+      abi: permit2Abi,
+      functionName: "approve",
+      args: [currency, auction, amount, Number(expiry)],
     }),
     value: 0n,
   };
@@ -130,40 +251,45 @@ export interface BidReadiness {
   /** Whether the bidder holds enough of the currency. */
   hasBalance: boolean;
   balance: bigint;
-  /** Whether the auction is already approved to pull `amount`. */
-  hasAllowance: boolean;
-  allowance: bigint;
-  /** True when an `approve` must be sent before the bid. */
+  /** ERC-20 allowance granted to Permit2. Unlimited for native currency. */
+  erc20AllowanceToPermit2: bigint;
+  /** Permit2 allowance granted to the auction. Unlimited for native currency. */
+  permit2AllowanceToAuction: bigint;
+  /** When the Permit2 allowance lapses, as unix seconds. */
+  permit2Expiration: bigint;
+  /** True when step 1 (ERC-20 -> Permit2) is still needed. */
+  needsErc20Approval: boolean;
+  /** True when step 2 (Permit2 -> auction) is still needed. */
+  needsPermit2Approval: boolean;
+  /** Convenience: either approval step is outstanding. */
   needsApproval: boolean;
 }
 
 /**
  * Check whether a bidder can actually submit a given bid right now.
  *
- * For native-currency auctions there is nothing to approve, so allowance is
- * reported as unlimited.
+ * Native-currency auctions need no approvals at all, so those are reported as
+ * unlimited rather than pretending an allowance was read.
  */
 export async function checkBidReadiness(
   client: BeaconClient,
-  params: {
-    auction: Address;
-    currency: Address;
-    bidder: Address;
-    amount: bigint;
-  },
+  params: { auction: Address; currency: Address; bidder: Address; amount: bigint },
 ): Promise<BidReadiness> {
   if (params.currency === NATIVE_CURRENCY) {
     const balance = await client.publicClient.getBalance({ address: params.bidder });
     return {
       hasBalance: balance >= params.amount,
       balance,
-      hasAllowance: true,
-      allowance: maxUint256,
+      erc20AllowanceToPermit2: maxUint256,
+      permit2AllowanceToAuction: maxUint256,
+      permit2Expiration: maxUint256,
+      needsErc20Approval: false,
+      needsPermit2Approval: false,
       needsApproval: false,
     };
   }
 
-  const [balance, allowance] = await client.publicClient.multicall({
+  const [balance, erc20Allowance, permit2Allowance] = await client.publicClient.multicall({
     allowFailure: false,
     contracts: [
       {
@@ -176,18 +302,82 @@ export async function checkBidReadiness(
         address: params.currency,
         abi: erc20ApprovalAbi,
         functionName: "allowance",
-        args: [params.bidder, params.auction],
+        args: [params.bidder, PERMIT2_ADDRESS],
+      },
+      {
+        address: PERMIT2_ADDRESS,
+        abi: permit2Abi,
+        functionName: "allowance",
+        args: [params.bidder, params.currency, params.auction],
       },
     ],
   });
 
+  const [permit2Amount, permit2Expiration] = permit2Allowance as readonly [bigint, number, number];
+  const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
+  const permit2Expired = BigInt(permit2Expiration) <= nowSeconds;
+
+  const needsErc20Approval = erc20Allowance < params.amount;
+  const needsPermit2Approval = permit2Amount < params.amount || permit2Expired;
+
   return {
     hasBalance: balance >= params.amount,
     balance,
-    hasAllowance: allowance >= params.amount,
-    allowance,
-    needsApproval: allowance < params.amount,
+    erc20AllowanceToPermit2: erc20Allowance,
+    permit2AllowanceToAuction: permit2Amount,
+    permit2Expiration: BigInt(permit2Expiration),
+    needsErc20Approval,
+    needsPermit2Approval,
+    needsApproval: needsErc20Approval || needsPermit2Approval,
   };
+}
+
+/**
+ * Every transaction needed to place this bid, in order.
+ * One entry for a native bid; up to three for an ERC-20 bid.
+ */
+export function buildBidTransactions(params: {
+  auction: Address;
+  currency: Address;
+  maxPriceQ96: bigint;
+  amount: bigint;
+  owner: Address;
+  readiness: BidReadiness;
+  prevTickPriceQ96?: bigint;
+  hookData?: Hex;
+}): Array<{ label: string; request: TransactionRequest }> {
+  const isNative = params.currency === NATIVE_CURRENCY;
+  const steps: Array<{ label: string; request: TransactionRequest }> = [];
+
+  if (!isNative) {
+    if (params.readiness.needsErc20Approval) {
+      steps.push({
+        label: "Approve Permit2 to move the bid currency",
+        request: encodeApproveErc20ToPermit2(params.currency),
+      });
+    }
+    if (params.readiness.needsPermit2Approval) {
+      steps.push({
+        label: "Grant the auction a Permit2 allowance",
+        request: encodeApprovePermit2(params.currency, params.auction),
+      });
+    }
+  }
+
+  steps.push({
+    label: "Submit bid",
+    request: encodeSubmitBid({
+      auction: params.auction,
+      maxPriceQ96: params.maxPriceQ96,
+      amount: params.amount,
+      owner: params.owner,
+      isNativeCurrency: isNative,
+      prevTickPriceQ96: params.prevTickPriceQ96,
+      hookData: params.hookData,
+    }),
+  });
+
+  return steps;
 }
 
 /**
