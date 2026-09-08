@@ -2,8 +2,24 @@
 
 Required for hackathon qualification.
 
-Submission to the Uniswap developer feedback form: **TODO(phase-6)** - link the
-completed submission at <https://developers.uniswap.org/hackathon-feedback>.
+**Feedback form submission:** _<!-- PASTE THE SUBMISSION LINK HERE -->_
+
+> Submitted at <https://developers.uniswap.org/hackathon-feedback>. The form has
+> to be submitted from the team's own account, so the confirmation link is
+> pasted in above by hand. Everything below is the content of that submission,
+> kept in the repo so it is reviewable alongside the code.
+
+Twelve findings from building four surfaces on the Continuous Clearing Auction
+protocol. Each one cost us real debugging time, and each is reproducible from
+this repo.
+
+**The three that would help most, in order:**
+
+1. Document that `submitBid` requires `maxPrice` on a tick boundary (#10) - it
+   is the difference between a working integration and an opaque 4-byte revert.
+2. Document that ERC-20 bids settle through Permit2, not a direct approval (#7).
+3. Publish a `CCALens` address, or document the `eth_call` state-override
+   pattern that removes the need for one (#1, #6).
 
 Running notes on the CCA developer experience, collected while building Beacon.
 
@@ -106,6 +122,15 @@ duration. Every integrator has to independently work out a remainder-handling
 scheme or hit `InvalidStepDataMps`. A helper in the periphery that builds a
 valid flat schedule from a duration would be a small, high-value addition.
 
-## Later phases
+## Reproducing these findings
 
-- _(Phase 6)_ -
+Every claim above is exercised by code in this repo:
+
+| Finding | Where it is demonstrated |
+| --- | --- |
+| #3 non-view `state()` | `packages/sdk/src/read.ts`, `packages/sdk/test/read.test.ts` |
+| #6 lens via state override | `pnpm --filter @beacon/cca-sdk check:live` works with no lens deployed |
+| #7 Permit2 for ERC-20 bids | `packages/sdk/test/write.test.ts` |
+| #10 tick-boundary bid prices | `packages/sdk/test/write.test.ts` - the exact price that reverted |
+| #11 `onTokensReceived()` | `packages/sdk/scripts/deploy-demo-auction.ts` step 4/4 |
+| #12 schedule must sum to MPS | `buildAuctionSteps()` + `packages/sdk/test/auctionParameters.test.ts` |

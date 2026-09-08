@@ -17,6 +17,7 @@ export * from "./client";
 export * from "./constants";
 export * from "./discover";
 export * from "./erc20";
+export * from "./privateKey";
 export * from "./q96";
 export * from "./read";
 export * from "./types";

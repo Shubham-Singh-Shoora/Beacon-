@@ -38,6 +38,7 @@ import {
   encodeAuctionParameters,
   factoryAbi,
   formatQ96,
+  normalizePrivateKey,
   packAuctionSteps,
   totalBlocks,
   totalMps,
@@ -155,14 +156,13 @@ async function main(): Promise<void> {
   }
 
   // --- signer ------------------------------------------------------------
-  const rawKey = (process.env.DEPLOYER_PRIVATE_KEY ?? process.env.AGENT_PRIVATE_KEY ?? "").trim();
-  if (!/^0x[0-9a-fA-F]{64}$/.test(rawKey)) {
-    throw new Error(
-      "DEPLOYER_PRIVATE_KEY (or AGENT_PRIVATE_KEY) must be set to a funded TESTNET key,\n" +
-        "as 0x followed by 64 hex characters. It is read from .env and never logged.",
-    );
-  }
-  const account = privateKeyToAccount(rawKey as Hex);
+  // Accepts the key with or without the 0x prefix; never logged either way.
+  const account = privateKeyToAccount(
+    normalizePrivateKey(
+      process.env.DEPLOYER_PRIVATE_KEY ?? process.env.AGENT_PRIVATE_KEY,
+      "DEPLOYER_PRIVATE_KEY",
+    ),
+  );
   const wallet = createWalletClient({ account, chain: beacon.chain, transport: http(RPC_URL) });
 
   const balance = await publicClient.getBalance({ address: account.address });

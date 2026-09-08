@@ -13,6 +13,23 @@ Beacon is four surfaces over one shared SDK:
 
 All four are thin consumers of **`packages/sdk`** (`@beacon/cca-sdk`), which owns every contract call, ABI, event type and Q96 conversion in the repo.
 
+## Live demo
+
+Beacon deployed its own CCA auction on Sepolia so all four surfaces have
+something real to act on:
+
+| | |
+| --- | --- |
+| Auction | [`0x1e40451D6ecabA8640559b7dFbe63B41dA52460d`](https://sepolia.etherscan.io/address/0x1e40451D6ecabA8640559b7dFbe63B41dA52460d) |
+| Token | BEACON (Beacon Demo), 1,000 supply, 18 decimals |
+| Currency | native ETH |
+| Window | blocks 11663205 → 11666805 (~12 hours) |
+| A real bid from the agent | [`0x9cd1af26…3de0cc50`](https://sepolia.etherscan.io/tx/0x9cd1af2697f2983c74febc20c03d93056354a75dcac0fce383fde1623de0cc50) — status 1, 383,145 gas |
+
+That bid moved the clearing price off the floor (5.42105e-20 → 5.99989e-20 ETH
+per BEACON) and cleared 2.2216 BEACON, which the directory, the widget and the
+bot all read back through the same SDK.
+
 ## We do not modify Uniswap's contracts
 
 Beacon is a *consumer* of the already-deployed `ContinuousClearingAuction`, `CCALens` and `ContinuousClearingAuctionFactory` contracts. `contracts/` is a read-only reference copy. Everything new lives in our own packages.
@@ -20,24 +37,33 @@ Beacon is a *consumer* of the already-deployed `ContinuousClearingAuction`, `CCA
 ## Where Beacon touches the CCA contracts
 
 Exact file + line references, per the hackathon qualification requirement.
-Every contract interaction in the repo lives in `packages/sdk` - the web app,
-widget, bot and agent import these and never build their own calls.
+**Every contract interaction in the repo lives in `packages/sdk`** — the web
+app, widget, bot and agent import these and never build their own calls.
 
-| Interaction | Where |
+### The three required interactions
+
+| Interaction | File and lines |
 | --- | --- |
-| Lens `state()` call | [`packages/sdk/src/read.ts:66-105`](packages/sdk/src/read.ts#L66-L105) - `getAuctionState()` |
-| Factory `AuctionCreated` event | [`packages/sdk/src/discover.ts:19`](packages/sdk/src/discover.ts#L19) (event) and [`:67-136`](packages/sdk/src/discover.ts#L67-L136) (`scanAuctions`) |
-| Live `AuctionCreated` watching | [`packages/sdk/src/discover.ts:138-163`](packages/sdk/src/discover.ts#L138-L163) - `watchAuctions()` |
-| Auction view functions | [`packages/sdk/src/read.ts:108-157`](packages/sdk/src/read.ts#L108-L157) - `getAuctionInfo()`, `getClearingPrice()`, `isGraduated()` |
-| `submitBid` encoding | [`packages/sdk/src/write.ts`](packages/sdk/src/write.ts) - `encodeSubmitBid()` |
-| ERC-20 bid approvals (Permit2) | [`packages/sdk/src/write.ts`](packages/sdk/src/write.ts) - `encodeApproveErc20ToPermit2()`, `encodeApprovePermit2()` |
-| Tick hint for `submitBid` | [`packages/sdk/src/write.ts`](packages/sdk/src/write.ts) - `getPrevTickHint()` |
-| `submitBid` from the agent | [`apps/bidding-agent/src/agent.ts`](apps/bidding-agent/src/agent.ts) |
-| `submitBid` from the widget | [`packages/widget/src/AuctionCard.tsx:160-176`](packages/widget/src/AuctionCard.tsx#L160-L176) |
-| Cheap batched list reads | [`packages/sdk/src/read.ts`](packages/sdk/src/read.ts) - `getAuctionListStates()` |
+| **`submitBid`** — encoding | [`packages/sdk/src/write.ts:162-207`](packages/sdk/src/write.ts#L162-L207) — `encodeSubmitBid()`; the `submitBid` calls are at [`:184`](packages/sdk/src/write.ts#L184) (no-hint overload) and [`:190`](packages/sdk/src/write.ts#L190) (tick-hint overload) |
+| **`submitBid`** — broadcast from the agent | [`apps/bidding-agent/src/agent.ts:173`](apps/bidding-agent/src/agent.ts#L173) |
+| **`submitBid`** — broadcast from the widget | [`packages/widget/src/AuctionCard.tsx:175`](packages/widget/src/AuctionCard.tsx#L175) |
+| **Lens `state()`** | [`packages/sdk/src/read.ts:66-105`](packages/sdk/src/read.ts#L66-L105) — `getAuctionState()`; the `state` call is encoded at [`:69`](packages/sdk/src/read.ts#L69) and decoded at [`:97`](packages/sdk/src/read.ts#L97) |
+| **Factory `AuctionCreated` event** | [`packages/sdk/src/discover.ts:19`](packages/sdk/src/discover.ts#L19) — the event; scanned at [`:83-163`](packages/sdk/src/discover.ts#L83-L163) (`scanAuctions`, filter at [`:105`](packages/sdk/src/discover.ts#L105)); watched live at [`:179`](packages/sdk/src/discover.ts#L179) |
+
+### Supporting interactions
+
+| Interaction | File and lines |
+| --- | --- |
+| Factory `initializeDistribution` (creates our demo auction) | [`packages/sdk/scripts/deploy-demo-auction.ts:195`](packages/sdk/scripts/deploy-demo-auction.ts#L195) |
+| Bid transaction sequencing (native vs ERC-20/Permit2) | [`packages/sdk/src/write.ts:375-430`](packages/sdk/src/write.ts#L375-L430) — `buildBidTransactions()` |
+| Tick-boundary alignment for bid prices | [`packages/sdk/src/write.ts`](packages/sdk/src/write.ts) — `alignPriceToTickBoundary()` |
+| `prevTickPrice` hint lookup | [`packages/sdk/src/write.ts`](packages/sdk/src/write.ts) — `getPrevTickHint()` |
+| Auction view functions | [`packages/sdk/src/read.ts`](packages/sdk/src/read.ts) — `getAuctionInfo()`, `getClearingPrice()`, `isGraduated()`, `getAuctionListStates()` |
+| `AuctionParameters` encode/decode | [`packages/sdk/src/auctionParameters.ts`](packages/sdk/src/auctionParameters.ts) |
 
 ABIs are compiled from pinned upstream source by
-[`contracts/sync-abis.sh`](contracts/sync-abis.sh), never hand-written.
+[`contracts/sync-abis.sh`](contracts/sync-abis.sh) at tag `v1.1.0`
+(`a0aabaa`), never hand-written.
 
 ## Target network and contract addresses (verified)
 
@@ -48,7 +74,9 @@ Beacon targets **Ethereum Sepolia (chain id 11155111)**.
 | `ContinuousClearingAuctionFactory` v1.1.0 | `0xCCccCcCAE7503Cac057829BF2811De42E16e0bD5` |
 | Factory creation block | `10130119` (2026-01-26) |
 | `AuctionCreated` topic0 | `0x7ede475fad18ccf0039f2b956c4d43a8b4ed0853de4daaa8ae25299f331ae3b9` |
-| Auctions discovered on Sepolia | 85, across 72 unique tokens |
+| Auctions discovered on Sepolia | 134, across 112 unique tokens |
+| **Beacon's own demo auction** | [`0x1e40451D6ecabA8640559b7dFbe63B41dA52460d`](https://sepolia.etherscan.io/address/0x1e40451D6ecabA8640559b7dFbe63B41dA52460d) |
+| Demo token (BEACON) | [`0xfd352aceb064802f13173e50a1b3c80172541167`](https://sepolia.etherscan.io/address/0xfd352aceb064802f13173e50a1b3c80172541167) |
 | `AuctionStateLens` | none published - Beacon runs it via `eth_call` state override, no deployment needed |
 
 **How the factory address was verified.** Not by trusting a docs page or an
@@ -102,6 +130,11 @@ per page load - and why `data/auctions.sepolia.json` is committed.
 - **`eth_getLogs` must be chunked.** Public Sepolia RPCs reject spans over
   50,000 blocks, and some clients report this as an empty result rather than an
   error - which silently looks like "no auctions exist".
+
+## Demo
+
+See **[DEMO.md](DEMO.md)** for a step-by-step walkthrough of all four surfaces
+against Beacon's live demo auction.
 
 ## Setup
 
@@ -265,8 +298,8 @@ pnpm deploy:demo -- --rpc http://localhost:8545 --duration 1200 --start-delay 3
 - [x] Phase 2 — Telegram alert bot
 - [x] Phase 3 — web directory + widget
 - [x] Phase 4 — bidding agent (write side)
-- [x] Phase 5 — demo auction (deploy tooling + fork-verified; public Sepolia deploy needs a funded key)
-- [ ] Phase 6 — submission polish
+- [x] Phase 5 — demo auction (deployed and live on Sepolia)
+- [x] Phase 6 — submission polish
 
 ## License
 

@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 import { privateKeyToAccount } from "viem/accounts";
 import { isAddress } from "viem";
 import type { Address, PrivateKeyAccount } from "viem";
-import { decimalToQ96 } from "@beacon/cca-sdk";
+import { decimalToQ96, normalizePrivateKey, PrivateKeyFormatError } from "@beacon/cca-sdk";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "../../..");
@@ -118,14 +118,14 @@ function loadAccount(broadcast: boolean): PrivateKeyAccount | undefined {
     return undefined;
   }
 
-  if (!/^0x[0-9a-fA-F]{64}$/.test(raw)) {
-    // Deliberately does not echo the value.
-    throw new ConfigError(
-      "AGENT_PRIVATE_KEY is malformed: expected 0x followed by 64 hex characters.",
-    );
+  try {
+    // Accepts the key with or without the 0x prefix. Errors describe the shape
+    // of the problem and never echo the value.
+    return privateKeyToAccount(normalizePrivateKey(raw, "AGENT_PRIVATE_KEY"));
+  } catch (error) {
+    if (error instanceof PrivateKeyFormatError) throw new ConfigError(error.message);
+    throw error;
   }
-
-  return privateKeyToAccount(raw as `0x${string}`);
 }
 
 export function loadConfig(argv: readonly string[] = process.argv.slice(2)): AgentConfig {
