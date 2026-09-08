@@ -9,7 +9,10 @@ export default tseslint.config(
       "**/.next/**",
       "**/coverage/**",
       "contracts/**",
-      "**/src/abis/*.json",
+      // Generated, not authored: Next.js writes next-env.d.ts, and the ABI
+      // modules come from ./contracts/sync-abis.sh.
+      "**/next-env.d.ts",
+      "**/src/abis/**",
     ],
   },
   js.configs.recommended,

@@ -23,18 +23,23 @@
       }
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsup",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "check:live": "tsx test/live-check.ts"
   },
   "dependencies": {
     "viem": "^2.40.0"
   },
   "devDependencies": {
+    "dotenv": "^17.2.3",
     "tsup": "^8.5.0",
+    "tsx": "^4.20.6",
     "typescript": "^5.9.3",
     "vitest": "^3.2.4"
   }
