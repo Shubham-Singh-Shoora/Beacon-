@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   formatMpsPercent,
   formatQ96,
+  formatQ96Compact,
   fromValueX7,
   MPS,
   mpsToFraction,
@@ -159,5 +160,33 @@ describe("supply schedule helpers", () => {
 
   it("unwraps ValueX7 back to base units", () => {
     expect(fromValueX7(MPS * 42n)).toBe(42n);
+  });
+});
+
+describe("formatQ96Compact", () => {
+  it("switches to scientific notation for very small prices", () => {
+    // A real Sepolia clearing price. Plain, this is 25 characters of zeros.
+    const realClearingPrice = 4295100000n;
+    expect(formatQ96(realClearingPrice)).toBe("0.0000000000000000000542118");
+    expect(formatQ96Compact(realClearingPrice)).toBe("5.42118e-20");
+  });
+
+  it("leaves comfortably readable values alone", () => {
+    expect(formatQ96Compact(Q96)).toBe("1");
+    expect(formatQ96Compact(Q96 / 2n)).toBe("0.5");
+    expect(formatQ96Compact(decimalToQ96("0.0001"))).toBe("0.0001");
+    expect(formatQ96Compact(decimalToQ96("0.000001"))).toBe("0.000001");
+    expect(formatQ96Compact(0n)).toBe("0");
+  });
+
+  it("agrees with formatQ96 on the digits it shows", () => {
+    // Same rounding, so a compact price never contradicts the plain one.
+    const value = 79228162514264n;
+    expect(formatQ96(value)).toBe("0.000000000000001");
+    expect(formatQ96Compact(value)).toBe("1e-15");
+  });
+
+  it("handles negatives", () => {
+    expect(formatQ96Compact(-4295100000n)).toBe("-5.42118e-20");
   });
 });

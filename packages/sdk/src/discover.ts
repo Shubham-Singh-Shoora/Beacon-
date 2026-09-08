@@ -98,8 +98,9 @@ export async function scanAuctions(
   while (cursor <= headBlock) {
     const chunkEnd = min(cursor + chunkSize - 1n, headBlock);
 
+    // Log scanning may use a different provider than state reads.
     const fetchChunk = async (from: bigint, to: bigint): Promise<AuctionCreatedLog[]> =>
-      (await client.publicClient.getLogs({
+      (await client.logsClient.getLogs({
         address: client.factoryAddress,
         event: auctionCreatedEvent,
         fromBlock: from,
@@ -173,7 +174,7 @@ export function watchAuctions(
   onAuction: (auction: DiscoveredAuction) => void,
   options: { pollingIntervalMs?: number; onError?: (error: Error) => void } = {},
 ): () => void {
-  return client.publicClient.watchEvent({
+  return client.logsClient.watchEvent({
     address: client.factoryAddress,
     event: auctionCreatedEvent,
     poll: true,

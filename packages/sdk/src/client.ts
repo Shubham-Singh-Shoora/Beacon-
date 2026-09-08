@@ -12,8 +12,18 @@ import {
 } from "./constants";
 
 export interface BeaconClientConfig {
-  /** JSON-RPC endpoint. An archive-capable provider makes discovery much faster. */
+  /** JSON-RPC endpoint used for state reads (eth_call, multicall). */
   rpcUrl: string;
+  /**
+   * Optional separate endpoint for `eth_getLogs`.
+   *
+   * State reads and log scanning have different provider requirements, and one
+   * endpoint is often bad at one of them. Alchemy's free tier serves eth_call
+   * beautifully but caps eth_getLogs at a 10-block range, which makes a
+   * historical backfill impossible; public wide-range endpoints allow the range
+   * but can silently return empty results. Defaults to `rpcUrl`.
+   */
+  logsRpcUrl?: string;
   /** Chain id. Must be a supported testnet - mainnet is rejected. */
   chainId: number;
   /** Override the factory address. Defaults to the cross-chain singleton. */
@@ -31,6 +41,8 @@ export interface BeaconClientConfig {
 
 export interface BeaconClient {
   publicClient: PublicClient;
+  /** Client used for `eth_getLogs`. Same as `publicClient` unless overridden. */
+  logsClient: PublicClient;
   chain: Chain;
   chainId: number;
   factoryAddress: Address;
@@ -70,6 +82,11 @@ export function createBeaconClient(config: BeaconClientConfig): BeaconClient {
     batch: { multicall: true },
   }) as PublicClient;
 
+  const logsClient =
+    config.logsRpcUrl && config.logsRpcUrl !== config.rpcUrl
+      ? (createPublicClient({ chain, transport: http(config.logsRpcUrl) }) as PublicClient)
+      : publicClient;
+
   const factoryDeployBlock = config.factoryDeployBlock ?? FACTORY_DEPLOY_BLOCK[config.chainId];
   if (factoryDeployBlock === undefined) {
     throw new Error(
@@ -80,6 +97,7 @@ export function createBeaconClient(config: BeaconClientConfig): BeaconClient {
 
   return {
     publicClient,
+    logsClient,
     chain,
     chainId: config.chainId,
     factoryAddress: config.factoryAddress ?? FACTORY_ADDRESS,

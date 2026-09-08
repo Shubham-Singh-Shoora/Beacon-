@@ -2,7 +2,7 @@
   "name": "beacon",
   "version": "0.1.0",
   "private": true,
-  "description": "Beacon — developer tooling for Uniswap's Continuous Clearing Auction (CCA) protocol",
+  "description": "Beacon \u00e2\u20ac\u201d developer tooling for Uniswap's Continuous Clearing Auction (CCA) protocol",
   "license": "MIT",
   "packageManager": "pnpm@10.23.0",
   "engines": {
@@ -17,7 +17,9 @@
     "format": "prettier --write \"**/*.{ts,tsx,md,json,css}\"",
     "web": "pnpm --filter @beacon/web dev",
     "bot": "pnpm --filter @beacon/telegram-bot dev",
-    "agent": "pnpm --filter @beacon/bidding-agent dev"
+    "agent": "pnpm --filter @beacon/bidding-agent dev",
+    "sync:auctions": "pnpm --filter @beacon/cca-sdk sync",
+    "demo:embed": "pnpm --filter @beacon/cca-widget build && node -e \"require('fs').copyFileSync('packages/widget/dist/mount.global.js','apps/web/public/beacon-widget.js')\""
   },
   "devDependencies": {
     "@eslint/js": "^9.39.0",

@@ -85,6 +85,9 @@ importers:
       '@beacon/cca-widget':
         specifier: workspace:*
         version: link:../../packages/widget
+      dotenv:
+        specifier: ^17.2.3
+        version: 17.4.2
       next:
         specifier: ^15.5.4
         version: 15.5.25(@types/node@22.20.1)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)

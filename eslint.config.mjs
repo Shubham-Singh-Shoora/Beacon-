@@ -12,6 +12,8 @@ export default tseslint.config(
       // Generated, not authored: Next.js writes next-env.d.ts, and the ABI
       // modules come from ./contracts/sync-abis.sh.
       "**/next-env.d.ts",
+      // Built widget bundle copied in by `pnpm demo:embed`, plus static demo assets.
+      "apps/web/public/**",
       "**/src/abis/**",
     ],
   },

@@ -9,6 +9,7 @@
   "types": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts",
+    "./node": "./src/node.ts",
     "./package.json": "./package.json"
   },
   "publishConfig": {
@@ -20,6 +21,11 @@
         "types": "./dist/index.d.ts",
         "import": "./dist/index.js",
         "require": "./dist/index.cjs"
+      },
+      "./node": {
+        "types": "./dist/node.d.ts",
+        "import": "./dist/node.js",
+        "require": "./dist/node.cjs"
       }
     }
   },
@@ -31,7 +37,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "check:live": "tsx test/live-check.ts"
+    "check:live": "tsx test/live-check.ts",
+    "sync": "tsx test/sync-cli.ts"
   },
   "dependencies": {
     "viem": "^2.40.0"

@@ -1,10 +1,15 @@
 /**
  * @beacon/cca-sdk
  *
- * Shared read/write core for Uniswap's Continuous Clearing Auction contracts.
- * The directory site, embeddable widget, Telegram bot and bidding agent are all
+ * Shared core for Uniswap's Continuous Clearing Auction contracts. The
+ * directory site, embeddable widget, Telegram bot and bidding agent are all
  * thin consumers of this package. Contract calls, ABIs, event decoding and Q96
  * math live here and nowhere else.
+ *
+ * This entry point is ISOMORPHIC - safe in a browser bundle. Anything that
+ * touches the filesystem (the auction store, sync and enrichment) lives in
+ * `@beacon/cca-sdk/node`, because importing it here would drag `node:fs` into
+ * the widget's bundle and break any client-side build.
  */
 export * from "./abis";
 export * from "./client";

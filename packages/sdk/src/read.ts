@@ -241,3 +241,54 @@ export async function getAuctionSummaries(
 
   return results;
 }
+
+/**
+ * The cheap, batchable slice of live state used by directory list views.
+ *
+ * Every field here is a `view` function on the auction, so a whole page of
+ * auctions resolves in one multicall - no lens, no per-auction round trips.
+ * Use {@link getAuctionState} when you need the freshest checkpointed state.
+ */
+export interface AuctionListState {
+  auction: Address;
+  clearingPriceQ96: bigint;
+  isGraduated: boolean;
+  currencyRaised: bigint;
+  totalCleared: bigint;
+}
+
+/** Read {@link AuctionListState} for many auctions in a single multicall. */
+export async function getAuctionListStates(
+  client: BeaconClient,
+  auctions: readonly Address[],
+): Promise<Map<Address, AuctionListState>> {
+  const result = new Map<Address, AuctionListState>();
+  if (auctions.length === 0) return result;
+
+  const contracts = auctions.flatMap((auction) => {
+    const base = { address: auction, abi: auctionAbi } as const;
+    return [
+      { ...base, functionName: "clearingPrice" },
+      { ...base, functionName: "isGraduated" },
+      { ...base, functionName: "currencyRaised" },
+      { ...base, functionName: "totalCleared" },
+    ];
+  });
+
+  // allowFailure: one broken auction must not blank the whole page.
+  const responses = await client.publicClient.multicall({ allowFailure: true, contracts });
+
+  auctions.forEach((auction, index) => {
+    const [price, graduated, raised, cleared] = responses.slice(index * 4, index * 4 + 4);
+    if (price?.status !== "success") return;
+    result.set(auction, {
+      auction,
+      clearingPriceQ96: price.result as bigint,
+      isGraduated: graduated?.status === "success" ? (graduated.result as boolean) : false,
+      currencyRaised: raised?.status === "success" ? (raised.result as bigint) : 0n,
+      totalCleared: cleared?.status === "success" ? (cleared.result as bigint) : 0n,
+    });
+  });
+
+  return result;
+}

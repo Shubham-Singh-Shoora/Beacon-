@@ -58,11 +58,13 @@ function makeFakeClient(options: {
   headBlock: bigint;
   getLogs: (args: { fromBlock: bigint; toBlock: bigint }) => Promise<unknown[]>;
 }): BeaconClient {
+  const rpc = {
+    getBlockNumber: async () => options.headBlock,
+    getLogs: options.getLogs,
+  };
   return {
-    publicClient: {
-      getBlockNumber: async () => options.headBlock,
-      getLogs: options.getLogs,
-    },
+    publicClient: rpc,
+    logsClient: rpc,
     chain: { name: "Fake Testnet" },
     chainId: 11155111,
     factoryAddress: "0xCCccCcCAE7503Cac057829BF2811De42E16e0bD5",

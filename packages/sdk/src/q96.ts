@@ -181,3 +181,41 @@ export function formatMpsPercent(cumulativeMps: bigint | number, fractionDigits 
 export function fromValueX7(valueX7: bigint): bigint {
   return valueX7 / X7;
 }
+
+/**
+ * Format a Q96 value compactly, switching to scientific notation when a value
+ * is too small to read as a decimal.
+ *
+ * Real CCA clearing prices on Sepolia are around 5.4e-20. Rendered plainly that
+ * is "0.000000000000000000054212" - 25 characters of mostly zeros, which
+ * destroys a table layout and is genuinely hard to compare at a glance. Below
+ * 1e-6 this switches to "5.4212e-20".
+ *
+ * Rounding is inherited from {@link formatQ96}, so the compact and plain
+ * renderings of the same value never disagree.
+ */
+export function formatQ96Compact(valueQ96: bigint, significantDigits = 6): string {
+  if (valueQ96 === 0n) return "0";
+
+  const negative = valueQ96 < 0n;
+  const magnitude = negative ? -valueQ96 : valueQ96;
+  const sign = negative ? "-" : "";
+
+  const plain = formatQ96(magnitude, significantDigits);
+  const [integerPart = "0", fractionalPart = ""] = plain.split(".");
+
+  // Anything at or above 1 already reads fine.
+  if (integerPart !== "0") return `${sign}${plain}`;
+
+  const firstSignificant = fractionalPart.search(/[1-9]/);
+  if (firstSignificant === -1) return "0";
+
+  // Up to 1e-6 the plain form is still comfortable to read.
+  if (firstSignificant < 6) return `${sign}${plain}`;
+
+  const digits = fractionalPart.slice(firstSignificant).replace(/0+$/, "");
+  const exponent = -(firstSignificant + 1);
+  const mantissa = digits.length > 1 ? `${digits[0]}.${digits.slice(1)}` : digits;
+
+  return `${sign}${mantissa}e${exponent}`;
+}
