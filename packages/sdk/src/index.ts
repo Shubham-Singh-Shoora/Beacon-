@@ -10,6 +10,7 @@ export * from "./abis";
 export * from "./client";
 export * from "./constants";
 export * from "./discover";
+export * from "./erc20";
 export * from "./q96";
 export * from "./read";
 export * from "./types";

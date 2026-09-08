@@ -6,7 +6,10 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
-    "typecheck": "tsc --noEmit"
+    "dry-run": "tsx src/index.ts --dry-run",
+    "simulate": "tsx src/index.ts --simulate",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
     "@beacon/cca-sdk": "workspace:*",
@@ -17,6 +20,7 @@
   "devDependencies": {
     "@types/node": "^22.18.0",
     "tsx": "^4.20.6",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
   }
 }

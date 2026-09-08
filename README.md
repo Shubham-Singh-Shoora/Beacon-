@@ -97,6 +97,9 @@ cp .env.example .env   # then fill in RPC URL, factory address, etc.
 | `pnpm build` | Builds the publishable packages (`sdk`, `widget`) |
 | `pnpm web` | Next.js directory site on :3000 |
 | `pnpm bot` | Telegram alert bot (polling mode) |
+| `pnpm bot -- --dry-run` | Print alerts to the console - no bot token needed |
+| `pnpm bot -- --once` | Read current state once and exit |
+| `pnpm bot -- --simulate` | Drive the real alert pipeline through a full auction lifecycle |
 | `pnpm agent` | Bidding agent |
 
 Workspace packages are consumed as TypeScript source (Next `transpilePackages`, `tsx` for the Node apps), so there is no build step to run before the apps.
@@ -109,7 +112,7 @@ Workspace packages are consumed as TypeScript source (Next `transpilePackages`, 
 
 - [x] Phase 0 — scaffolding
 - [x] Phase 1 — SDK read side
-- [ ] Phase 2 — Telegram alert bot
+- [x] Phase 2 — Telegram alert bot
 - [ ] Phase 3 — web directory + widget
 - [ ] Phase 4 — bidding agent (write side)
 - [ ] Phase 5 — demo auction

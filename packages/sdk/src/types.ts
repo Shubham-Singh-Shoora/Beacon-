@@ -7,7 +7,9 @@
  */
 import type { Address, Hex } from "viem";
 
-export type { Address, Hex };
+// Re-exported so consumers get Beacon's types and the viem primitives they are
+// built from without adding a direct viem import.
+export type { Address, Chain, Hex } from "viem";
 
 /**
  * A checkpoint of auction state at a given block.

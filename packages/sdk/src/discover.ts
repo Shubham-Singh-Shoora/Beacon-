@@ -25,6 +25,22 @@ export interface ScanOptions {
   toBlock?: bigint;
   /** Blocks per `eth_getLogs` request. Defaults to 50,000. */
   chunkSize?: bigint;
+  /**
+   * Re-query a chunk that came back empty, this many times, before believing it.
+   *
+   * Some public RPCs (observed on ethereum-sepolia-rpc.publicnode.com) are load
+   * balanced across backends with incomplete log indexes and answer an
+   * identical `eth_getLogs` with either the real logs or an empty array, with no
+   * error. That silently under-reports auctions. Re-querying an empty chunk
+   * reduces the chance of believing a false empty, but CANNOT eliminate it -
+   * the real fix is a reliable RPC endpoint. Defaults to 2.
+   */
+  emptyChunkRetries?: number;
+  /**
+   * Called when an empty chunk turned out to be a lie on retry. A caller seeing
+   * these should switch RPC providers rather than trust the scan.
+   */
+  onAnomaly?: (anomaly: { fromBlock: bigint; toBlock: bigint; recoveredLogs: number }) => void;
   /** Called after each chunk, for progress reporting on long scans. */
   onProgress?: (progress: {
     fromBlock: bigint;
@@ -74,6 +90,7 @@ export async function scanAuctions(
 
   if (startBlock > headBlock) return [];
 
+  const emptyChunkRetries = options.emptyChunkRetries ?? 2;
   const found: DiscoveredAuction[] = [];
   let cursor = startBlock;
   let chunkSize = maxChunk;
@@ -81,14 +98,30 @@ export async function scanAuctions(
   while (cursor <= headBlock) {
     const chunkEnd = min(cursor + chunkSize - 1n, headBlock);
 
-    let logs: AuctionCreatedLog[];
-    try {
-      logs = (await client.publicClient.getLogs({
+    const fetchChunk = async (from: bigint, to: bigint): Promise<AuctionCreatedLog[]> =>
+      (await client.publicClient.getLogs({
         address: client.factoryAddress,
         event: auctionCreatedEvent,
-        fromBlock: cursor,
-        toBlock: chunkEnd,
+        fromBlock: from,
+        toBlock: to,
       })) as AuctionCreatedLog[];
+
+    let logs: AuctionCreatedLog[];
+    try {
+      logs = await fetchChunk(cursor, chunkEnd);
+
+      // An empty result from an unreliable endpoint may be a lie. Re-ask.
+      for (let attempt = 0; logs.length === 0 && attempt < emptyChunkRetries; attempt++) {
+        const retry = await fetchChunk(cursor, chunkEnd);
+        if (retry.length > 0) {
+          options.onAnomaly?.({
+            fromBlock: cursor,
+            toBlock: chunkEnd,
+            recoveredLogs: retry.length,
+          });
+          logs = retry;
+        }
+      }
     } catch (error) {
       // Most likely a provider-specific range or response-size cap. Back off and
       // retry rather than losing auctions.

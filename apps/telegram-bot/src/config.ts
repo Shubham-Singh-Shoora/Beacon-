@@ -1,0 +1,133 @@
+/**
+ * Environment parsing and validation for the alert bot.
+ *
+ * Fails fast with an actionable message rather than starting up and silently
+ * never alerting.
+ */
+import { config as loadEnv } from "dotenv";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { decimalToQ96 } from "@beacon/cca-sdk";
+import type { Address } from "viem";
+import { isAddress } from "viem";
+
+const here = dirname(fileURLToPath(import.meta.url));
+loadEnv({ path: resolve(here, "../../../.env"), quiet: true });
+
+export interface BotConfig {
+  rpcUrl: string;
+  chainId: number;
+  lensAddress?: Address;
+  /** Auctions to watch. Empty means "discover and auto-select". */
+  watchAuctions: Address[];
+  pollIntervalMs: number;
+  telegram: {
+    botToken?: string;
+    chatId?: string;
+  };
+  thresholds: {
+    priceAboveQ96?: bigint;
+    priceBelowQ96?: bigint;
+    /** Alert when a live auction has fewer than this many minutes left. */
+    minutesLeft?: number;
+  };
+  /** Render alerts to stdout instead of sending them. */
+  dryRun: boolean;
+  /** Evaluate once and exit, instead of polling forever. */
+  once: boolean;
+  /** Push a scripted sequence of state changes through the real alert pipeline. */
+  simulate: boolean;
+  /** Max auctions to auto-select when none are configured explicitly. */
+  autoSelectLimit: number;
+}
+
+function parseAddressList(raw: string | undefined, label: string): Address[] {
+  if (!raw) return [];
+  const parts = raw
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0 && !/^0x0{40}$/i.test(part));
+
+  for (const part of parts) {
+    if (!isAddress(part)) {
+      throw new Error(`${label}: "${part}" is not a valid address.`);
+    }
+  }
+  return parts as Address[];
+}
+
+function parsePriceThreshold(raw: string | undefined, label: string): bigint | undefined {
+  if (!raw || raw.trim().length === 0) return undefined;
+  try {
+    return decimalToQ96(raw.trim());
+  } catch {
+    throw new Error(`${label}: "${raw}" is not a decimal price (e.g. 0.0001).`);
+  }
+}
+
+function parseNumber(raw: string | undefined, fallback: number, label: string): number {
+  if (!raw || raw.trim().length === 0) return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`${label}: "${raw}" is not a positive number.`);
+  }
+  return value;
+}
+
+export function loadConfig(argv: readonly string[] = process.argv.slice(2)): BotConfig {
+  const flags = new Set(argv.filter((arg) => arg.startsWith("--")));
+  const lens = process.env.BEACON_LENS_ADDRESS?.trim();
+
+  const config: BotConfig = {
+    rpcUrl: process.env.BEACON_RPC_URL ?? "https://ethereum-sepolia-rpc.publicnode.com",
+    chainId: Number(process.env.BEACON_CHAIN_ID ?? 11155111),
+    // Empty is correct and supported: reads then run through an eth_call state
+    // override, so the bot works with no lens deployment at all.
+    lensAddress: lens && lens.length > 0 && isAddress(lens) ? (lens as Address) : undefined,
+    watchAuctions: parseAddressList(
+      process.env.BEACON_WATCH_AUCTION_ADDRESS,
+      "BEACON_WATCH_AUCTION_ADDRESS",
+    ),
+    pollIntervalMs: parseNumber(
+      process.env.BEACON_POLL_INTERVAL_SECONDS,
+      15,
+      "BEACON_POLL_INTERVAL_SECONDS",
+    ) * 1000,
+    telegram: {
+      botToken: process.env.TELEGRAM_BOT_TOKEN?.trim() || undefined,
+      chatId: process.env.TELEGRAM_CHAT_ID?.trim() || undefined,
+    },
+    thresholds: {
+      priceAboveQ96: parsePriceThreshold(
+        process.env.BEACON_ALERT_PRICE_ABOVE,
+        "BEACON_ALERT_PRICE_ABOVE",
+      ),
+      priceBelowQ96: parsePriceThreshold(
+        process.env.BEACON_ALERT_PRICE_BELOW,
+        "BEACON_ALERT_PRICE_BELOW",
+      ),
+      minutesLeft: process.env.BEACON_ALERT_MINUTES_LEFT
+        ? parseNumber(process.env.BEACON_ALERT_MINUTES_LEFT, 15, "BEACON_ALERT_MINUTES_LEFT")
+        : 15,
+    },
+    dryRun: flags.has("--dry-run"),
+    once: flags.has("--once"),
+    simulate: flags.has("--simulate"),
+    autoSelectLimit: parseNumber(process.env.BEACON_AUTO_SELECT_LIMIT, 5, "BEACON_AUTO_SELECT_LIMIT"),
+  };
+
+  if (!config.dryRun) {
+    const missing: string[] = [];
+    if (!config.telegram.botToken) missing.push("TELEGRAM_BOT_TOKEN");
+    if (!config.telegram.chatId) missing.push("TELEGRAM_CHAT_ID");
+    if (missing.length > 0) {
+      throw new Error(
+        `Missing ${missing.join(" and ")} in .env.\n` +
+          `Get a token from @BotFather, then set TELEGRAM_CHAT_ID to the channel or DM id.\n` +
+          `Or run with --dry-run to print alerts to the console instead of sending them.`,
+      );
+    }
+  }
+
+  return config;
+}

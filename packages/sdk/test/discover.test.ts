@@ -82,7 +82,7 @@ describe("scanAuctions chunking", () => {
       },
     });
 
-    await scanAuctions(client, { fromBlock: 0n, chunkSize: 50_000n });
+    await scanAuctions(client, { fromBlock: 0n, chunkSize: 50_000n, emptyChunkRetries: 0 });
 
     expect(ranges).toEqual([
       [0n, 49_999n],
@@ -101,7 +101,7 @@ describe("scanAuctions chunking", () => {
       },
     });
 
-    await scanAuctions(client, { fromBlock: 1_000n, chunkSize: 50_000n });
+    await scanAuctions(client, { fromBlock: 1_000n, chunkSize: 50_000n, emptyChunkRetries: 0 });
 
     expect(ranges[0]![0]).toBe(1_000n);
     expect(ranges.at(-1)![1]).toBe(137_777n);
@@ -125,7 +125,7 @@ describe("scanAuctions chunking", () => {
       },
     });
 
-    await scanAuctions(client, { fromBlock: 0n, chunkSize: 50_000n });
+    await scanAuctions(client, { fromBlock: 0n, chunkSize: 50_000n, emptyChunkRetries: 0 });
 
     expect(accepted.length).toBeGreaterThan(0);
     for (const [from, to] of accepted) {
@@ -144,7 +144,9 @@ describe("scanAuctions chunking", () => {
       },
     });
 
-    await expect(scanAuctions(client, { fromBlock: 0n, chunkSize: 1n })).rejects.toThrow(/boom/);
+    await expect(
+      scanAuctions(client, { fromBlock: 0n, chunkSize: 1n, emptyChunkRetries: 0 }),
+    ).rejects.toThrow(/boom/);
   });
 
   it("returns nothing when the start block is past the head", async () => {
@@ -162,9 +164,78 @@ describe("scanAuctions chunking", () => {
     await scanAuctions(client, {
       fromBlock: 0n,
       chunkSize: 50_000n,
+      emptyChunkRetries: 0,
       onProgress: (p) => progress.push(Number(p.scannedTo)),
     });
 
     expect(progress).toEqual([49_999, 99_999, 100_000]);
+  });
+});
+
+/**
+ * Regression coverage for a REAL failure observed on
+ * ethereum-sepolia-rpc.publicnode.com: an identical `eth_getLogs` returns the
+ * true logs about half the time and an empty array the rest, with no error.
+ * Four full scans of the same range yielded 52, 60, 44 and 55 auctions.
+ */
+describe("scanAuctions resilience to false-empty chunks", () => {
+  const fakeLog = {
+    args: {
+      auction: "0xa26DBABBbF9451F150A87d7635f6891474c4F0FA",
+      token: "0x59eB743864BA3008d3A89aFb2b66029269C66088",
+      amount: 1n,
+      configData: "0x",
+    },
+    blockNumber: 5n,
+    transactionHash: "0xdead",
+    logIndex: 0,
+  };
+
+  it("re-queries an empty chunk and recovers logs the RPC lied about", async () => {
+    let call = 0;
+    const client = makeFakeClient({
+      headBlock: 10n,
+      // First answer is a false empty; the retry tells the truth.
+      getLogs: async () => (++call === 1 ? [] : [fakeLog]),
+    });
+
+    const anomalies: number[] = [];
+    const found = await scanAuctions(client, {
+      fromBlock: 0n,
+      chunkSize: 50n,
+      emptyChunkRetries: 2,
+      onAnomaly: (a) => anomalies.push(a.recoveredLogs),
+    });
+
+    expect(found).toHaveLength(1);
+    expect(found[0]!.auction).toBe("0xa26DBABBbF9451F150A87d7635f6891474c4F0FA");
+    expect(anomalies).toEqual([1]);
+  });
+
+  it("accepts a genuinely empty range without reporting an anomaly", async () => {
+    const getLogs = vi.fn(async () => []);
+    const client = makeFakeClient({ headBlock: 10n, getLogs });
+    const anomalies: unknown[] = [];
+
+    const found = await scanAuctions(client, {
+      fromBlock: 0n,
+      chunkSize: 50n,
+      emptyChunkRetries: 2,
+      onAnomaly: (a) => anomalies.push(a),
+    });
+
+    expect(found).toEqual([]);
+    expect(anomalies).toEqual([]);
+    // One initial call plus the configured retries.
+    expect(getLogs).toHaveBeenCalledTimes(3);
+  });
+
+  it("can be turned off for a trusted endpoint", async () => {
+    const getLogs = vi.fn(async () => []);
+    const client = makeFakeClient({ headBlock: 10n, getLogs });
+
+    await scanAuctions(client, { fromBlock: 0n, chunkSize: 50n, emptyChunkRetries: 0 });
+
+    expect(getLogs).toHaveBeenCalledTimes(1);
   });
 });
