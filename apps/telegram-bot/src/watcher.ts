@@ -7,111 +7,98 @@
  */
 import {
   deriveStatus,
-  getAuctionInfo,
   getAuctionSummary,
+  getAuctionSummaries,
   getTokenMetadata,
   isFailedSummary,
-  getAuctionSummaries,
-  scanAuctions,
 } from "@beacon/cca-sdk";
 import type { Address, AuctionInfo, BeaconClient, TokenMetadata } from "@beacon/cca-sdk";
+import { JsonAuctionStore } from "@beacon/cca-sdk/node";
 import { evaluateAlerts } from "./alerts";
 import type { Alert, AlertThresholds, AuctionSnapshot } from "./alerts";
 import type { AuctionView } from "./format";
 
 export interface WatcherOptions {
   thresholds: AlertThresholds;
-  /** How many auctions to auto-select when none are configured. */
-  autoSelectLimit: number;
-  /** How many recent auctions to inspect when auto-selecting. */
-  autoSelectScanDepth?: number;
   onLog?: (message: string) => void;
 }
 
+/** One auction from the shared store, ready to show a user. */
+export interface StoreAuction {
+  auction: Address;
+  info: AuctionInfo;
+  token: TokenMetadata;
+  currency: TokenMetadata;
+  createdBlock: bigint;
+}
+
 /**
- * Choose which auctions to watch.
+ * Read the auction catalogue from the SAME persistent store the web directory
+ * uses (`data/auctions.sepolia.json`).
  *
- * Prefers auctions that can still change - live first, then pending - and falls
- * back to the most recently created ones so the bot always has something real to
- * report rather than a placeholder address.
+ * The bot used to run a full `AuctionCreated` scan on every startup. That is
+ * 1.5M blocks of `eth_getLogs`, which is slow, hammers the RPC, and - on the
+ * only endpoint that permits wide ranges - silently returns incomplete results.
+ * The store is built once by `pnpm sync:auctions` and shared, so startup is a
+ * file read.
  */
-export async function resolveWatchList(
-  client: BeaconClient,
-  configured: readonly Address[],
-  options: { limit: number; scanDepth?: number; onLog?: (message: string) => void },
-): Promise<{ auctions: Address[]; discovered: number; anomalies: number }> {
-  if (configured.length > 0) {
-    return { auctions: [...configured], discovered: configured.length, anomalies: 0 };
-  }
+export async function loadAuctionCatalogue(
+  storePath: string,
+  options: { onLog?: (message: string) => void } = {},
+): Promise<Map<string, StoreAuction>> {
+  const snapshot = await new JsonAuctionStore(storePath).read();
+  const catalogue = new Map<string, StoreAuction>();
 
-  let anomalies = 0;
-  options.onLog?.("No BEACON_WATCH_AUCTION_ADDRESS set - discovering auctions from the factory...");
-
-  const discovered = await scanAuctions(client, {
-    onAnomaly: () => {
-      anomalies++;
-    },
-  });
-
-  if (discovered.length === 0) {
-    return { auctions: [], discovered: 0, anomalies };
-  }
-
-  options.onLog?.(`Discovered ${discovered.length} auctions via AuctionCreated.`);
-
-  // Newest first, and only inspect a bounded window - classifying all of them
-  // would be a lot of RPC calls for little benefit.
-  const newestFirst = [...discovered].reverse();
-  const window = newestFirst.slice(0, options.scanDepth ?? 30);
-
-  const head = await client.publicClient.getBlockNumber();
-  const classified: Array<{ auction: Address; info: AuctionInfo; rank: number }> = [];
-
-  const concurrency = 5;
-  for (let i = 0; i < window.length; i += concurrency) {
-    const batch = window.slice(i, i + concurrency);
-    const settled = await Promise.all(
-      batch.map(async (entry) => {
-        try {
-          const info = await getAuctionInfo(client, entry.auction);
-          return { entry, info };
-        } catch {
-          return null;
-        }
-      }),
-    );
-
-    for (const result of settled) {
-      if (!result) continue;
-      const status = deriveStatus(result.info, head);
-      // live is most interesting, then pending, then ended.
-      const rank = status === "live" ? 0 : status === "pending" ? 1 : 2;
-      classified.push({ auction: result.entry.auction, info: result.info, rank });
-    }
-  }
-
-  classified.sort((a, b) => {
-    if (a.rank !== b.rank) return a.rank - b.rank;
-    // Within a rank, most recently starting first.
-    return a.info.startBlock > b.info.startBlock ? -1 : 1;
-  });
-
-  const best = classified.slice(0, options.limit);
-  const liveOrPending = classified.filter((c) => c.rank < 2).length;
-
-  if (liveOrPending === 0) {
+  if (!snapshot) {
     options.onLog?.(
-      `No live or pending auctions on this network right now - watching the ${best.length} most recent ended auctions instead.`,
+      `No auction store at ${storePath}. Run \`pnpm sync:auctions\` to build it.`,
     );
-  } else {
-    options.onLog?.(`${liveOrPending} live/pending auctions found.`);
+    return catalogue;
   }
 
-  return {
-    auctions: best.map((c) => c.auction),
-    discovered: discovered.length,
-    anomalies,
-  };
+  let incomplete = 0;
+  for (const record of snapshot.auctions) {
+    if (!record.info || !record.tokenMeta || !record.currencyMeta) {
+      incomplete++;
+      continue;
+    }
+    catalogue.set(record.auction.toLowerCase(), {
+      auction: record.auction,
+      info: record.info,
+      token: record.tokenMeta,
+      currency: record.currencyMeta,
+      createdBlock: record.blockNumber,
+    });
+  }
+
+  options.onLog?.(
+    `Loaded ${catalogue.size} auctions from the store (synced to block ${snapshot.lastSyncedBlock})` +
+      (incomplete > 0 ? `; ${incomplete} lack cached config - re-run \`pnpm sync:auctions\`` : ""),
+  );
+
+  return catalogue;
+}
+
+/**
+ * Suggest auctions worth watching: live first, then upcoming, then most
+ * recently created. Used by `/suggest` so a user has something to `/watch`.
+ */
+export function suggestAuctions(
+  catalogue: Map<string, StoreAuction>,
+  headBlock: bigint,
+  limit = 5,
+): StoreAuction[] {
+  const ranked = [...catalogue.values()]
+    .map((entry) => {
+      const status = deriveStatus(entry.info, headBlock);
+      return { entry, rank: status === "live" ? 0 : status === "pending" ? 1 : 2 };
+    })
+    .sort((a, b) => {
+      if (a.rank !== b.rank) return a.rank - b.rank;
+      return a.entry.createdBlock > b.entry.createdBlock ? -1 : 1;
+    });
+
+  return ranked.slice(0, limit).map((r) => r.entry);
 }
 
 function toSnapshot(view: AuctionView): AuctionSnapshot {
@@ -128,40 +115,41 @@ function toSnapshot(view: AuctionView): AuctionSnapshot {
 }
 
 export interface Watcher {
-  /** Auctions currently being watched. */
-  readonly watching: Address[];
-  add(auction: Address): void;
-  remove(auction: Address): boolean;
-  /** Read current state and return any alerts the change produced. */
-  tick(): Promise<{ alerts: Array<{ alert: Alert; view: AuctionView }>; views: AuctionView[] }>;
-  /** Current views without diffing, for /status and /list. */
-  snapshotViews(): Promise<AuctionView[]>;
+  /** Read current state for these auctions, and return alerts from any change. */
+  tick(auctions: readonly Address[]): Promise<{
+    alerts: Array<{ alert: Alert; view: AuctionView }>;
+    views: Map<string, AuctionView>;
+  }>;
+  /** Current views without diffing, for /status. */
+  viewsFor(auctions: readonly Address[]): Promise<AuctionView[]>;
+  /** Drop remembered state so an unwatched auction does not leak memory. */
+  forget(auction: Address): void;
 }
 
 export function createWatcher(
   client: BeaconClient,
-  initial: readonly Address[],
+  catalogue: Map<string, StoreAuction>,
   options: WatcherOptions,
 ): Watcher {
-  const watching = new Set<Address>(initial);
-  const previous = new Map<Address, AuctionSnapshot>();
-  // Token metadata is immutable, so read each currency/token exactly once.
-  const tokenCache = new Map<Address, TokenMetadata>();
+  const previous = new Map<string, AuctionSnapshot>();
+  const tokenCache = new Map<string, TokenMetadata>();
 
   async function metadata(address: Address): Promise<TokenMetadata> {
-    const cached = tokenCache.get(address);
+    const key = address.toLowerCase();
+    const cached = tokenCache.get(key);
     if (cached) return cached;
     const fetched = await getTokenMetadata(client, address);
-    tokenCache.set(address, fetched);
+    tokenCache.set(key, fetched);
     return fetched;
   }
 
-  async function buildViews(): Promise<AuctionView[]> {
-    const auctions = [...watching];
-    if (auctions.length === 0) return [];
+  async function buildViews(auctions: readonly Address[]): Promise<Map<string, AuctionView>> {
+    const views = new Map<string, AuctionView>();
+    if (auctions.length === 0) return views;
 
+    // The store already has each auction's immutable config, so pass it in and
+    // skip re-reading it from chain.
     const summaries = await getAuctionSummaries(client, auctions);
-    const views: AuctionView[] = [];
 
     for (const summary of summaries) {
       if (isFailedSummary(summary)) {
@@ -170,39 +158,42 @@ export function createWatcher(
         );
         continue;
       }
+
+      const cached = catalogue.get(summary.info.auction.toLowerCase());
       const [token, currency] = await Promise.all([
-        metadata(summary.info.token),
-        metadata(summary.info.currency),
+        cached?.token ?? metadata(summary.info.token),
+        cached?.currency ?? metadata(summary.info.currency),
       ]);
-      views.push({ summary, token, currency, chain: client.chain });
+
+      views.set(summary.info.auction.toLowerCase(), {
+        summary,
+        token,
+        currency,
+        chain: client.chain,
+      });
     }
 
     return views;
   }
 
   return {
-    get watching() {
-      return [...watching];
+    forget(auction) {
+      previous.delete(auction.toLowerCase());
     },
-    add(auction) {
-      watching.add(auction);
+
+    async viewsFor(auctions) {
+      return [...(await buildViews(auctions)).values()];
     },
-    remove(auction) {
-      previous.delete(auction);
-      return watching.delete(auction);
-    },
-    async snapshotViews() {
-      return buildViews();
-    },
-    async tick() {
-      const views = await buildViews();
+
+    async tick(auctions) {
+      const views = await buildViews(auctions);
       const alerts: Array<{ alert: Alert; view: AuctionView }> = [];
 
-      for (const view of views) {
-        const auction = view.summary.info.auction;
+      for (const view of views.values()) {
+        const key = view.summary.info.auction.toLowerCase();
         const current = toSnapshot(view);
-        const fired = evaluateAlerts(previous.get(auction), current, options.thresholds);
-        previous.set(auction, current);
+        const fired = evaluateAlerts(previous.get(key), current, options.thresholds);
+        previous.set(key, current);
         for (const alert of fired) alerts.push({ alert, view });
       }
 
@@ -211,5 +202,4 @@ export function createWatcher(
   };
 }
 
-/** Re-export so the entry point can prime a watcher without importing the SDK directly. */
 export { getAuctionSummary };

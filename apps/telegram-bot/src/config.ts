@@ -12,13 +12,24 @@ import type { Address } from "viem";
 import { isAddress } from "viem";
 
 const here = dirname(fileURLToPath(import.meta.url));
-loadEnv({ path: resolve(here, "../../../.env"), quiet: true });
+const repoRoot = resolve(here, "../../..");
+loadEnv({ path: resolve(repoRoot, ".env"), quiet: true });
 
 export interface BotConfig {
   rpcUrl: string;
+  /** Separate endpoint for eth_getLogs, when discovery is needed. */
+  logsRpcUrl?: string;
   chainId: number;
   lensAddress?: Address;
-  /** Auctions to watch. Empty means "discover and auto-select". */
+  /** Shared auction catalogue, written by `pnpm sync:auctions`. */
+  storePath: string;
+  /** Where per-chat /watch registrations are persisted. */
+  subscriptionsPath: string;
+  /**
+   * DEV/TESTING FALLBACK ONLY. Seeds the default chat's subscriptions at
+   * startup. Real usage is the `/watch` command, which is per chat and
+   * persists on its own.
+   */
   watchAuctions: Address[];
   pollIntervalMs: number;
   telegram: {
@@ -37,8 +48,6 @@ export interface BotConfig {
   once: boolean;
   /** Push a scripted sequence of state changes through the real alert pipeline. */
   simulate: boolean;
-  /** Max auctions to auto-select when none are configured explicitly. */
-  autoSelectLimit: number;
 }
 
 function parseAddressList(raw: string | undefined, label: string): Address[] {
@@ -80,7 +89,13 @@ export function loadConfig(argv: readonly string[] = process.argv.slice(2)): Bot
 
   const config: BotConfig = {
     rpcUrl: process.env.BEACON_RPC_URL ?? "https://ethereum-sepolia-rpc.publicnode.com",
+    logsRpcUrl: process.env.BEACON_LOGS_RPC_URL,
     chainId: Number(process.env.BEACON_CHAIN_ID ?? 11155111),
+    storePath: resolve(repoRoot, process.env.BEACON_STORE_PATH ?? "data/auctions.sepolia.json"),
+    subscriptionsPath: resolve(
+      repoRoot,
+      process.env.BEACON_SUBSCRIPTIONS_PATH ?? "data/telegram-subscriptions.json",
+    ),
     // Empty is correct and supported: reads then run through an eth_call state
     // override, so the bot works with no lens deployment at all.
     lensAddress: lens && lens.length > 0 && isAddress(lens) ? (lens as Address) : undefined,
@@ -113,7 +128,6 @@ export function loadConfig(argv: readonly string[] = process.argv.slice(2)): Bot
     dryRun: flags.has("--dry-run"),
     once: flags.has("--once"),
     simulate: flags.has("--simulate"),
-    autoSelectLimit: parseNumber(process.env.BEACON_AUTO_SELECT_LIMIT, 5, "BEACON_AUTO_SELECT_LIMIT"),
   };
 
   if (!config.dryRun) {

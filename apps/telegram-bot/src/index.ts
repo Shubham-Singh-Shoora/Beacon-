@@ -1,30 +1,32 @@
 /**
  * Beacon alert bot.
  *
- * Watches CCA auctions discovered from the factory and pings Telegram when the
- * clearing price crosses a threshold, an auction is about to end, it graduates,
- * or supply first clears.
+ * Users register auctions themselves with `/watch <address>`, per chat, and
+ * those registrations persist. The auction catalogue is read from the SAME
+ * store the web directory uses, so startup is a file read rather than a 1.5M
+ * block factory scan.
  *
  *   pnpm bot -- --dry-run     print alerts to the console, no token needed
  *   pnpm bot -- --once        one read of current state, then exit
  *   pnpm bot -- --simulate    drive the real alert pipeline with scripted changes
  *   pnpm bot                  poll and send to Telegram
  *
- * Works against a bare public RPC: no lens deployment and no BEACON_LENS_ADDRESS
- * are required, because state reads use an eth_call state override.
+ * Works against a bare public RPC: no lens deployment required.
  */
 import { Bot } from "grammy";
-import { assertChainMatches, createBeaconClient, formatQ96 } from "@beacon/cca-sdk";
-import type { Address } from "viem";
+import { assertChainMatches, createBeaconClient, deriveStatus, formatQ96 } from "@beacon/cca-sdk";
+import type { Address } from "@beacon/cca-sdk";
 import { isAddress } from "viem";
 import { hasNoActiveRules } from "./alerts";
 import { loadConfig } from "./config";
 import type { BotConfig } from "./config";
-import { escapeHtml, renderAlert, renderListEntry, renderStatus } from "./format";
+import { escapeHtml, renderAlert, renderStatus } from "./format";
 import { runSimulation } from "./simulate";
 import { createConsoleSink, createTelegramSink } from "./sink";
 import type { AlertSink } from "./sink";
-import { createWatcher, resolveWatchList } from "./watcher";
+import { SubscriptionStore } from "./subscriptions";
+import { createWatcher, loadAuctionCatalogue, suggestAuctions } from "./watcher";
+import type { StoreAuction } from "./watcher";
 
 function log(message: string): void {
   console.log(`[beacon-bot] ${message}`);
@@ -44,6 +46,17 @@ function describeThresholds(config: BotConfig): string {
   return parts.length > 0 ? parts.join(", ") : "none configured";
 }
 
+const HELP = [
+  "<b>Beacon</b> watches Uniswap CCA auctions and alerts on clearing price, graduation and closing time.",
+  "",
+  "/watch &lt;address&gt; — follow an auction in this chat",
+  "/unwatch &lt;address&gt; — stop following one",
+  "/list — auctions this chat follows",
+  "/status — current state of those auctions",
+  "/suggest — auctions worth following, from the indexed catalogue",
+  "/thresholds — the configured alert rules",
+].join("\n");
+
 async function main(): Promise<void> {
   const config = loadConfig();
 
@@ -57,6 +70,7 @@ async function main(): Promise<void> {
 
   const client = createBeaconClient({
     rpcUrl: config.rpcUrl,
+    logsRpcUrl: config.logsRpcUrl,
     chainId: config.chainId,
     lensAddress: config.lensAddress,
   });
@@ -67,136 +81,222 @@ async function main(): Promise<void> {
       : "no lens deployed - reading state via eth_call state override",
   );
 
-  const { auctions, discovered, anomalies } = await resolveWatchList(
-    client,
-    config.watchAuctions,
-    { limit: config.autoSelectLimit, onLog: log },
-  );
+  // Catalogue comes from the shared store, not a live factory scan.
+  const catalogue = await loadAuctionCatalogue(config.storePath, { onLog: log });
+  const subscriptions = new SubscriptionStore(config.subscriptionsPath);
+  await subscriptions.load();
 
-  if (anomalies > 0) {
+  // Dev/testing seed only. Real usage is /watch.
+  if (config.watchAuctions.length > 0 && config.telegram.chatId) {
+    for (const auction of config.watchAuctions) {
+      await subscriptions.watch(config.telegram.chatId, auction);
+    }
     log(
-      `WARNING: the RPC returned ${anomalies} false-empty log chunk(s). Discovery may be incomplete - use a reliable endpoint.`,
+      `seeded ${config.watchAuctions.length} auction(s) from BEACON_WATCH_AUCTION_ADDRESS (dev fallback)`,
     );
   }
 
-  if (auctions.length === 0) {
-    log("No auctions to watch. Set BEACON_WATCH_AUCTION_ADDRESS or check the RPC.");
-    process.exitCode = 1;
-    return;
-  }
-
-  log(`watching ${auctions.length} auction(s) of ${discovered} discovered:`);
-  for (const auction of auctions) log(`  ${auction}`);
-
-  const watcher = createWatcher(client, auctions, {
+  const watcher = createWatcher(client, catalogue, {
     thresholds: config.thresholds,
-    autoSelectLimit: config.autoSelectLimit,
     onLog: log,
   });
 
   // --- delivery -----------------------------------------------------------
   let bot: Bot | undefined;
-  let sink: AlertSink;
+  let consoleSink: AlertSink | undefined;
 
   if (config.dryRun) {
-    sink = createConsoleSink();
+    consoleSink = createConsoleSink();
+    log("alerts -> console (dry run)");
   } else {
     bot = new Bot(config.telegram.botToken!);
-    sink = createTelegramSink(bot, config.telegram.chatId!);
+    log("alerts -> Telegram, routed per subscribed chat");
   }
-  log(`alerts -> ${sink.name}`);
+
+  const sinkFor = (chatId: string): AlertSink =>
+    consoleSink ?? createTelegramSink(bot!, chatId);
+
+  const headBlock = await client.publicClient.getBlockNumber();
+
+  function resolveAuction(input: string): { address?: Address; error?: string } {
+    const trimmed = input.trim();
+    if (!isAddress(trimmed)) {
+      return { error: "That is not a valid address. Usage: <code>/watch 0x…</code>" };
+    }
+    return { address: trimmed as Address };
+  }
+
+  function describeCatalogueEntry(entry: StoreAuction): string {
+    const status = deriveStatus(entry.info, headBlock);
+    return `<code>${entry.auction}</code> — <b>${escapeHtml(entry.token.symbol)}</b> (${status})`;
+  }
 
   // --- one-shot modes -----------------------------------------------------
   if (config.simulate) {
-    log("simulating a full auction lifecycle through the real alert pipeline...");
-    const views = await watcher.snapshotViews();
-    const base = views[0];
-    if (!base) {
-      log("Could not read any auction to base the simulation on.");
+    const seed =
+      config.watchAuctions[0] ??
+      suggestAuctions(catalogue, headBlock, 1)[0]?.auction ??
+      undefined;
+    if (!seed) {
+      log("No auction available to base the simulation on. Run `pnpm sync:auctions` first.");
       process.exitCode = 1;
       return;
     }
+
+    const views = await watcher.viewsFor([seed]);
+    const base = views[0];
+    if (!base) {
+      log(`Could not read ${seed}.`);
+      process.exitCode = 1;
+      return;
+    }
+
+    const target = consoleSink ?? sinkFor(config.telegram.chatId!);
+    log(`simulating a full auction lifecycle through the real alert pipeline...`);
     log(`using real metadata from ${base.summary.info.auction} (${base.token.symbol}/${base.currency.symbol})`);
-    const sent = await runSimulation(base, config.thresholds, sink);
-    log(`simulation complete - ${sent} alert(s) delivered to ${sink.name}`);
+    const sent = await runSimulation(base, config.thresholds, target);
+    log(`simulation complete - ${sent} alert(s) delivered to ${target.name}`);
     return;
   }
 
   if (config.once) {
-    const { views } = await watcher.tick();
-    for (const view of views) {
-      await sink.send(renderStatus(view));
+    const auctions = await subscriptions.allAuctions();
+    if (auctions.length === 0) {
+      log("No chat is watching any auction. Use /watch, or set BEACON_WATCH_AUCTION_ADDRESS.");
+      return;
     }
+    const views = await watcher.viewsFor(auctions);
+    const target = consoleSink ?? sinkFor(config.telegram.chatId!);
+    for (const view of views) await target.send(renderStatus(view));
     log(`reported ${views.length} auction(s), exiting (--once)`);
     return;
   }
 
   // --- Telegram commands --------------------------------------------------
   if (bot) {
-    bot.command("start", (ctx) =>
-      ctx.reply(
-        "Beacon watches Uniswap CCA auctions and alerts on clearing price, graduation and closing time.\n\n" +
-          "/status - current state of watched auctions\n" +
-          "/list - watched auctions, one line each\n" +
-          "/watch <address> - add an auction\n" +
-          "/unwatch <address> - stop watching one\n" +
-          "/thresholds - show the configured alert rules",
-      ),
-    );
-    bot.command("help", (ctx) => ctx.reply("/status /list /watch /unwatch /thresholds"));
+    const reply = (ctx: { reply: (t: string, o?: object) => Promise<unknown> }, text: string) =>
+      ctx.reply(text, { parse_mode: "HTML", link_preview_options: { is_disabled: true } });
+
+    bot.command(["start", "help"], (ctx) => reply(ctx, HELP));
 
     bot.command("thresholds", (ctx) =>
-      ctx.reply(`Alert rules: ${describeThresholds(config)}`),
+      reply(ctx, `Alert rules: ${escapeHtml(describeThresholds(config))}`),
     );
 
-    bot.command("status", async (ctx) => {
-      const views = await watcher.snapshotViews();
-      if (views.length === 0) return ctx.reply("Not watching any auctions.");
-      for (const view of views) {
-        await ctx.reply(renderStatus(view), {
-          parse_mode: "HTML",
-          link_preview_options: { is_disabled: true },
-        });
-      }
-    });
-
-    bot.command("list", async (ctx) => {
-      const views = await watcher.snapshotViews();
-      if (views.length === 0) return ctx.reply("Not watching any auctions.");
-      await ctx.reply(views.map(renderListEntry).join("\n"), {
-        parse_mode: "HTML",
-        link_preview_options: { is_disabled: true },
-      });
-    });
-
     bot.command("watch", async (ctx) => {
-      const arg = ctx.match?.trim();
-      if (!arg || !isAddress(arg)) return ctx.reply("Usage: /watch 0x<auction address>");
-      watcher.add(arg as Address);
-      return ctx.reply(`Now watching ${escapeHtml(arg)}.`);
+      const { address, error } = resolveAuction(ctx.match ?? "");
+      if (!address) return reply(ctx, error!);
+
+      const chatId = String(ctx.chat.id);
+      const known = catalogue.get(address.toLowerCase());
+      const added = await subscriptions.watch(chatId, address);
+
+      if (!added) return reply(ctx, `Already watching <code>${address}</code>.`);
+
+      // An address outside the catalogue is still accepted - it may be newer
+      // than the last sync - but say so rather than pretending it is known.
+      const note = known
+        ? `<b>${escapeHtml(known.token.symbol)}</b> (${deriveStatus(known.info, headBlock)})`
+        : "not in the indexed catalogue — it may be newer than the last sync, or not a CCA auction";
+
+      return reply(ctx, `Now watching <code>${address}</code>\n${note}`);
     });
 
     bot.command("unwatch", async (ctx) => {
-      const arg = ctx.match?.trim();
-      if (!arg || !isAddress(arg)) return ctx.reply("Usage: /unwatch 0x<auction address>");
-      const removed = watcher.remove(arg as Address);
-      return ctx.reply(removed ? `Stopped watching ${escapeHtml(arg)}.` : "That auction was not being watched.");
+      const { address, error } = resolveAuction(ctx.match ?? "");
+      if (!address) return reply(ctx, error!);
+
+      const removed = await subscriptions.unwatch(String(ctx.chat.id), address);
+      if (removed && (await subscriptions.subscribersOf(address)).length === 0) {
+        watcher.forget(address);
+      }
+      return reply(
+        ctx,
+        removed
+          ? `Stopped watching <code>${address}</code>.`
+          : "This chat was not watching that auction.",
+      );
+    });
+
+    bot.command("list", async (ctx) => {
+      const auctions = await subscriptions.auctionsFor(String(ctx.chat.id));
+      if (auctions.length === 0) {
+        return reply(ctx, "This chat is not watching any auctions yet. Try /suggest, then /watch.");
+      }
+      const lines = auctions.map((auction) => {
+        const entry = catalogue.get(auction.toLowerCase());
+        return entry ? describeCatalogueEntry(entry) : `<code>${auction}</code>`;
+      });
+      return reply(ctx, `Watching ${auctions.length}:\n${lines.join("\n")}`);
+    });
+
+    bot.command("suggest", async (ctx) => {
+      const suggestions = suggestAuctions(catalogue, headBlock, 5);
+      if (suggestions.length === 0) {
+        return reply(ctx, "The auction catalogue is empty. Run <code>pnpm sync:auctions</code>.");
+      }
+      return reply(
+        ctx,
+        `From ${catalogue.size} indexed auctions:\n${suggestions.map(describeCatalogueEntry).join("\n")}\n\nFollow one with <code>/watch &lt;address&gt;</code>.`,
+      );
+    });
+
+    bot.command("status", async (ctx) => {
+      const auctions = await subscriptions.auctionsFor(String(ctx.chat.id));
+      if (auctions.length === 0) return reply(ctx, "This chat is not watching any auctions.");
+
+      const views = await watcher.viewsFor(auctions);
+      if (views.length === 0) return reply(ctx, "Could not read any of those auctions.");
+      for (const view of views) await reply(ctx, renderStatus(view));
+      return undefined;
     });
 
     bot.catch((error) => console.error("[beacon-bot] telegram error:", error.message));
-    void bot.start({ onStart: () => log("telegram polling started") });
+    void bot.start({ onStart: (info) => log(`telegram polling started as @${info.username}`) });
   }
 
   // --- baseline + poll loop ----------------------------------------------
+  async function pollOnce(isBaseline: boolean): Promise<void> {
+    const auctions = await subscriptions.allAuctions();
+    if (auctions.length === 0) return;
+
+    const { alerts, views } = await watcher.tick(auctions);
+
+    if (isBaseline) {
+      log(`baseline established for ${views.size} auction(s) across all chats`);
+      for (const view of views.values()) {
+        log(
+          `  ${view.summary.info.auction} ${view.token.symbol}/${view.currency.symbol} ` +
+            `${view.summary.status} price=${formatQ96(view.summary.state.checkpoint.clearingPriceQ96)}`,
+        );
+      }
+      return;
+    }
+
+    for (const { alert, view } of alerts) {
+      // Route each alert only to the chats that asked for that auction.
+      const chatIds = consoleSink
+        ? ["console"]
+        : await subscriptions.subscribersOf(alert.auction);
+
+      log(`ALERT ${alert.kind} on ${alert.auction} -> ${chatIds.length} chat(s)`);
+      const message = renderAlert(alert, view);
+      for (const chatId of chatIds) {
+        try {
+          await sinkFor(chatId).send(message);
+        } catch (error) {
+          log(`failed to deliver to ${chatId}: ${(error as Error).message.split("\n")[0]}`);
+        }
+      }
+    }
+  }
+
   // The first tick only establishes a baseline. Rules are edge triggered, so
   // without this the bot would alert on conditions that were already true.
-  const { views } = await watcher.tick();
-  log(`baseline established for ${views.length} auction(s)`);
-  for (const view of views) {
-    log(
-      `  ${view.summary.info.auction} ${view.token.symbol}/${view.currency.symbol} ` +
-        `${view.summary.status} price=${formatQ96(view.summary.state.checkpoint.clearingPriceQ96)}`,
-    );
+  await pollOnce(true);
+
+  if (await subscriptions.isEmpty()) {
+    log("No chat is watching any auction yet - send /watch <address> in Telegram to start.");
   }
 
   let stopping = false;
@@ -216,11 +316,7 @@ async function main(): Promise<void> {
     await new Promise((r) => setTimeout(r, config.pollIntervalMs));
     if (stopping) return;
     try {
-      const { alerts } = await watcher.tick();
-      for (const { alert, view } of alerts) {
-        log(`ALERT ${alert.kind} on ${alert.auction}`);
-        await sink.send(renderAlert(alert, view));
-      }
+      await pollOnce(false);
     } catch (error) {
       // A transient RPC failure must not kill a long-running watcher.
       log(`poll failed: ${(error as Error).message.split("\n")[0]}`);
