@@ -12,6 +12,7 @@
  * the widget's bundle and break any client-side build.
  */
 export * from "./abis";
+export * from "./auctionParameters";
 export * from "./client";
 export * from "./constants";
 export * from "./discover";

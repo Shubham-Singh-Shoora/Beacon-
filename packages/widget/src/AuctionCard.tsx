@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import {
+  alignPriceToTickBoundary,
   buildBidTransactions,
   checkBidReadiness,
   decimalToQ96,
@@ -102,7 +103,16 @@ export function AuctionCard(props: AuctionCardProps) {
     amount: parsed.amountUnits,
     maxPriceQ96: parsed.maxPriceQ96,
     floorPriceQ96: info.floorPriceQ96,
+    tickSpacing: info.tickSpacing,
   });
+
+  // The contract only accepts prices on a tick boundary, so show the bidder the
+  // price that will actually be submitted rather than surprising them later.
+  const alignedPriceQ96 =
+    parsed.maxPriceQ96 > 0n
+      ? alignPriceToTickBoundary(parsed.maxPriceQ96, info.tickSpacing)
+      : 0n;
+  const priceWasSnapped = alignedPriceQ96 > 0n && alignedPriceQ96 !== parsed.maxPriceQ96;
 
   const bidDisabled =
     props.readOnly ||
@@ -155,6 +165,8 @@ export function AuctionCard(props: AuctionCardProps) {
         owner: wallet.address,
         readiness,
         prevTickPriceQ96,
+        // Snapped DOWN to a tick boundary; the contract rejects any other price.
+        tickSpacing: data.info.tickSpacing,
       });
 
       let hash = "" as `0x${string}`;
@@ -250,6 +262,13 @@ export function AuctionCard(props: AuctionCardProps) {
                 placeholder={formatQ96(info.floorPriceQ96)}
                 inputMode="decimal"
               />
+
+              {priceWasSnapped ? (
+                <div style={styles.muted}>
+                  Will bid at {formatQ96Compact(alignedPriceQ96)} {currency.symbol} — prices snap
+                  down to the auction&apos;s tick spacing.
+                </div>
+              ) : null}
 
               <label style={styles.label} htmlFor="beacon-amount">
                 Bid amount ({currency.symbol})

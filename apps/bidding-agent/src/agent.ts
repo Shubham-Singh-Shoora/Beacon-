@@ -8,6 +8,7 @@
  * `msg.value` rule are handled in exactly one place, shared with the widget.
  */
 import {
+  alignPriceToTickBoundary,
   buildBidTransactions,
   checkBidReadiness,
   formatQ96,
@@ -140,6 +141,8 @@ export async function tick(
     owner,
     readiness,
     prevTickPriceQ96,
+    // Snapped DOWN to a tick boundary; an unaligned price reverts on-chain.
+    tickSpacing: context.info.tickSpacing,
   });
 
   const plan = steps.map((step) => ({
@@ -217,6 +220,7 @@ export async function buildPlanForInspection(context: AgentContext): Promise<{
   isNative: boolean;
   readiness: Awaited<ReturnType<typeof checkBidReadiness>>;
   prevTickPriceQ96: bigint;
+  alignedPriceQ96: bigint;
 }> {
   const { client, config } = context;
   const owner = config.account?.address ?? config.auction;
@@ -252,6 +256,7 @@ export async function buildPlanForInspection(context: AgentContext): Promise<{
     owner,
     readiness,
     prevTickPriceQ96,
+    tickSpacing: context.info.tickSpacing,
   }).map((step) => ({
     label: step.label,
     to: step.request.to,
@@ -259,5 +264,14 @@ export async function buildPlanForInspection(context: AgentContext): Promise<{
     data: step.request.data,
   }));
 
-  return { steps, isNative: context.info.currency === NATIVE_CURRENCY, readiness, prevTickPriceQ96 };
+  return {
+    steps,
+    isNative: context.info.currency === NATIVE_CURRENCY,
+    readiness,
+    prevTickPriceQ96,
+    alignedPriceQ96: alignPriceToTickBoundary(
+      config.strategy.maxPriceQ96,
+      context.info.tickSpacing,
+    ),
+  };
 }

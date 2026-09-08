@@ -125,6 +125,8 @@ cp .env.example .env   # then fill in RPC URL, factory address, etc.
 | `pnpm sync:auctions` | Scan `AuctionCreated` into the local store, then cache each auction's config |
 | `pnpm sync:auctions -- --full --passes 3` | Re-scan everything, unioning passes to converge on a flaky RPC |
 | `pnpm demo:embed` | Build the vanilla widget bundle into the web app's `public/` |
+| `pnpm deploy:demo -- --dry-run` | Validate demo-auction parameters against every constructor rule |
+| `pnpm deploy:demo` | Deploy the demo ERC-20 + CCA auction (needs a funded testnet key) |
 | `pnpm agent` | Bidding agent (broadcasts only if `AGENT_BROADCAST=true`) |
 | `pnpm agent -- --simulate` | Drive the real strategy through a scripted price walk |
 | `pnpm agent -- --plan` | Build and print the real bid transactions; never sends |
@@ -187,6 +189,21 @@ can only make the agent bid *earlier*, never at a higher price - and the price
 it submits is always the cap itself, so an early trigger cannot overpay. These
 directions are asserted in `apps/bidding-agent/test/strategy.test.ts`.
 
+### Bid prices must sit on a tick boundary
+
+`submitBid` reverts with `TickPriceNotAtBoundary()` (`0xd76fb50f`) unless
+`maxPrice` is an exact multiple of the auction's `tickSpacing`. The constructor
+applies that rule to the floor price, and it applies to **every bid** too, which
+is not documented. A price a human types essentially never lands on a boundary.
+
+`alignPriceToTickBoundary()` snaps a price DOWN - the only safe direction, since
+it can lower a bidder's ceiling but never raise it. `buildBidTransactions()`
+applies it automatically, and the widget shows the adjusted price before the
+bidder commits.
+
+This was found by running the agent against a forked Sepolia: the first real
+`submitBid` reverted.
+
 ### ERC-20 bids go through Permit2
 
 This is the single easiest thing to get wrong. `ContinuousClearingAuction`
@@ -202,6 +219,41 @@ which calls Permit2's `transferFrom(from,to,uint160,token)` (`0x36c78516`).
 transaction for a native auction, up to three for an ERC-20 one - and both the
 widget and the agent use it, so neither can drift from the other.
 
+## The demo auction
+
+`pnpm deploy:demo` creates an auction Beacon controls, because every CCA auction
+already on Sepolia has closed. The flow, in the order the contracts demand:
+
+1. deploy a demo ERC-20 (whole supply to the deployer)
+2. `factory.initializeDistribution(token, amount, configData, salt)`
+3. transfer the supply to the new auction
+4. **`auction.onTokensReceived()`** — without this the auction exists, looks
+   configured, and rejects every bid
+
+`encodeAuctionParameters()` validates every constructor rule before any gas is
+spent, naming the revert each check prevents. It is verified by decoding real
+`configData` from auctions that actually deployed and re-encoding it
+byte-identically.
+
+### Verified against a Sepolia fork
+
+The whole path was exercised on `anvil --fork-url <sepolia>`, against the real
+deployed factory bytecode:
+
+| Step | Result |
+| --- | --- |
+| Deploy demo ERC-20 + auction | auction created, `AuctionCreated` decoded |
+| `onTokensReceived()` | accepted |
+| Agent reads state | `status=live` |
+| Agent `submitBid` | **receipt status 1**, `BidSubmitted` emitted, `nextBidId` 1, auction balance 0.001 ETH |
+
+Reproduce it with:
+
+```bash
+anvil --fork-url $BEACON_RPC_URL --host 0.0.0.0 --port 8545 --chain-id 11155111
+pnpm deploy:demo -- --rpc http://localhost:8545 --duration 1200 --start-delay 3
+```
+
 ## Safety
 
 **Testnet only.** No mainnet transactions anywhere in this repo. `.env` is gitignored; `.env.example` holds placeholders only. The bidding agent additionally enforces a chain-id allowlist and a hard max-spend cap.
@@ -213,7 +265,7 @@ widget and the agent use it, so neither can drift from the other.
 - [x] Phase 2 — Telegram alert bot
 - [x] Phase 3 — web directory + widget
 - [x] Phase 4 — bidding agent (write side)
-- [ ] Phase 5 — demo auction
+- [x] Phase 5 — demo auction (deploy tooling + fork-verified; public Sepolia deploy needs a funded key)
 - [ ] Phase 6 — submission polish
 
 ## License

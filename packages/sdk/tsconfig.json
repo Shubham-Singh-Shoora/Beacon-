@@ -4,5 +4,10 @@
     "outDir": "dist",
     "rootDir": "."
   },
-  "include": ["src/**/*", "test/**/*", "tsup.config.ts"]
+  "include": [
+    "src/**/*",
+    "test/**/*",
+    "scripts/**/*",
+    "tsup.config.ts"
+  ]
 }

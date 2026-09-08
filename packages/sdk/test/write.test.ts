@@ -4,11 +4,13 @@ import { auctionAbi } from "../src/abis";
 import { NATIVE_CURRENCY, PERMIT2_ADDRESS } from "../src/constants";
 import { decimalToQ96 } from "../src/q96";
 import {
+  alignPriceToTickBoundary,
   buildBidTransactions,
   describeBidBlocker,
   encodeApproveErc20ToPermit2,
   encodeApprovePermit2,
   encodeSubmitBid,
+  isPriceOnTickBoundary,
   permit2Abi,
 } from "../src/write";
 import type { BidReadiness } from "../src/write";
@@ -251,5 +253,72 @@ describe("describeBidBlocker", () => {
     expect(
       describeBidBlocker({ ...base, readiness: readiness({ hasBalance: false }) }),
     ).toMatch(/insufficient/i);
+  });
+});
+
+describe("tick boundary alignment", () => {
+  // Regression: an unaligned maxPrice reverts on-chain with
+  // TickPriceNotAtBoundary() (0xd76fb50f). Caught by a fork test after the
+  // agent's first real submitBid reverted.
+  const SPACING = 100_000n;
+
+  it("snaps a price DOWN to the nearest boundary", () => {
+    expect(alignPriceToTickBoundary(4_295_099_999n, SPACING)).toBe(4_295_000_000n);
+    expect(alignPriceToTickBoundary(4_295_100_000n, SPACING)).toBe(4_295_100_000n);
+  });
+
+  it("never rounds a price UP, which would raise the bidder's ceiling", () => {
+    for (const price of [1n, SPACING - 1n, SPACING + 1n, 4_753_086_102n]) {
+      expect(alignPriceToTickBoundary(price, SPACING)).toBeLessThanOrEqual(price);
+    }
+  });
+
+  it("recognises boundary prices", () => {
+    expect(isPriceOnTickBoundary(4_295_000_000n, SPACING)).toBe(true);
+    // The exact price that reverted on the fork.
+    expect(isPriceOnTickBoundary(4_753_086_102n, SPACING)).toBe(false);
+  });
+
+  it("refuses to encode a misaligned price when tickSpacing is known", () => {
+    expect(() =>
+      encodeSubmitBid({
+        auction: AUCTION,
+        maxPriceQ96: 4_753_086_102n,
+        amount: AMOUNT,
+        owner: BIDDER,
+        isNativeCurrency: true,
+        tickSpacing: SPACING,
+      }),
+    ).toThrow(/TickPriceNotAtBoundary/);
+  });
+
+  it("buildBidTransactions aligns before encoding", () => {
+    const steps = buildBidTransactions({
+      auction: AUCTION,
+      currency: NATIVE_CURRENCY,
+      maxPriceQ96: 4_753_086_102n,
+      amount: AMOUNT,
+      owner: BIDDER,
+      readiness: readiness({ needsErc20Approval: false, needsPermit2Approval: false }),
+      tickSpacing: SPACING,
+    });
+
+    const decoded = decodeFunctionData({ abi: auctionAbi, data: steps[0]!.request.data });
+    const submitted = decoded.args[0] as bigint;
+    expect(submitted % SPACING).toBe(0n);
+    expect(submitted).toBe(4_753_000_000n);
+    expect(submitted).toBeLessThan(4_753_086_102n);
+  });
+
+  it("blocks a price that rounds down below the floor", () => {
+    expect(
+      describeBidBlocker({
+        status: "live",
+        amount: AMOUNT,
+        maxPriceQ96: 4_295_050_000n,
+        floorPriceQ96: 4_295_000_001n,
+        tickSpacing: SPACING,
+      }),
+    ).toMatch(/rounds down below/i);
   });
 });

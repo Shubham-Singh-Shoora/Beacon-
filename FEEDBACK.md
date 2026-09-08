@@ -80,6 +80,32 @@ TypeScript ABI.** The four- and five-argument overloads differ only in arity, so
 an encoder picks between them by argument count. That is fine once you know, but
 worth a note.
 
+## Phase 5: deploying an auction
+
+**10. `submitBid` requires `maxPrice` to be on a tick boundary, and this is not
+documented.**
+`TickStorage._getTick` reverts with `TickPriceNotAtBoundary()` for any price
+that is not a multiple of `tickSpacing`. The NatSpec explains that rule for the
+FLOOR price but not for bids, so the natural implementation - take the user's
+price, convert to Q96, submit - reverts with a bare 4-byte selector. We only
+found it by running against a forked Sepolia. Either documenting it on
+`submitBid`, or having the contract snap the price down itself, would remove a
+whole class of broken integrations.
+
+**11. `onTokensReceived()` is a required step that is easy to miss.**
+After `initializeDistribution` the auction exists and every view function
+returns sensible values, but bids revert until the supply has been transferred
+in AND `onTokensReceived()` has been called. Nothing in the factory's interface
+hints that creation is a three-transaction process. A sentence on
+`initializeDistribution` describing the full sequence would help.
+
+**12. The supply schedule's exact-sum requirement is unforgiving.**
+`sum(mps * blockDelta)` must equal `MPS` exactly and the block deltas must land
+precisely on `endBlock`, but `MPS` (1e7) rarely divides evenly by a chosen
+duration. Every integrator has to independently work out a remainder-handling
+scheme or hit `InvalidStepDataMps`. A helper in the periphery that builds a
+valid flat schedule from a duration would be a small, high-value addition.
+
 ## Later phases
 
-- _(Phase 5)_ -
+- _(Phase 6)_ -

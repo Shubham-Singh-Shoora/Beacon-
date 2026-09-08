@@ -4,6 +4,9 @@ node_modules/
 
 # build output
 dist/
+# Foundry artifacts for the demo token (regenerate with ./contracts/build-demo.sh)
+contracts/demo/out/
+contracts/demo/cache/
 .next/
 out/
 *.tsbuildinfo

@@ -105,6 +105,29 @@ export interface TransactionRequest {
   value: bigint;
 }
 
+/**
+ * Round a price DOWN to the nearest tick boundary.
+ *
+ * `submitBid` reverts with `TickPriceNotAtBoundary()` unless `maxPrice` is an
+ * exact multiple of the auction's `tickSpacing` - the same rule the constructor
+ * applies to the floor price, but it also applies to every bid. A price typed
+ * by a human almost never lands on a boundary, so it has to be snapped.
+ *
+ * Rounding DOWN is the only safe direction: it can only lower the ceiling a
+ * bidder is committing to, never raise it above what they asked for.
+ */
+export function alignPriceToTickBoundary(priceQ96: bigint, tickSpacing: bigint): bigint {
+  if (tickSpacing <= 0n) {
+    throw new RangeError(`alignPriceToTickBoundary: tickSpacing must be positive, got ${tickSpacing}`);
+  }
+  return (priceQ96 / tickSpacing) * tickSpacing;
+}
+
+/** True when a price sits exactly on a tick boundary. */
+export function isPriceOnTickBoundary(priceQ96: bigint, tickSpacing: bigint): boolean {
+  return tickSpacing > 0n && priceQ96 % tickSpacing === 0n;
+}
+
 export interface SubmitBidParams {
   auction: Address;
   /** Highest price the bidder will pay, Q96-encoded. Use `decimalToQ96`. */
@@ -123,6 +146,12 @@ export interface SubmitBidParams {
    * See {@link getPrevTickHint}.
    */
   prevTickPriceQ96?: bigint;
+  /**
+   * The auction's tick spacing. When given, the price is checked against it so
+   * a misaligned bid fails here with a clear message instead of on-chain with
+   * an opaque `TickPriceNotAtBoundary()`.
+   */
+  tickSpacing?: bigint;
 }
 
 /**
@@ -139,6 +168,13 @@ export function encodeSubmitBid(params: SubmitBidParams): TransactionRequest {
   }
   if (params.maxPriceQ96 <= 0n) {
     throw new RangeError(`submitBid: maxPriceQ96 must be positive, got ${params.maxPriceQ96}`);
+  }
+  if (params.tickSpacing !== undefined && !isPriceOnTickBoundary(params.maxPriceQ96, params.tickSpacing)) {
+    throw new RangeError(
+      `submitBid: maxPriceQ96 ${params.maxPriceQ96} is not a multiple of tickSpacing ` +
+        `${params.tickSpacing} and would revert with TickPriceNotAtBoundary(). ` +
+        `Use alignPriceToTickBoundary() first.`,
+    );
   }
 
   const data =
@@ -345,6 +381,8 @@ export function buildBidTransactions(params: {
   readiness: BidReadiness;
   prevTickPriceQ96?: bigint;
   hookData?: Hex;
+  /** When given, the price is snapped down to a boundary before encoding. */
+  tickSpacing?: bigint;
 }): Array<{ label: string; request: TransactionRequest }> {
   const isNative = params.currency === NATIVE_CURRENCY;
   const steps: Array<{ label: string; request: TransactionRequest }> = [];
@@ -364,16 +402,24 @@ export function buildBidTransactions(params: {
     }
   }
 
+  // A human-entered price almost never lands on a tick boundary, and the
+  // contract rejects it outright. Snap down before encoding.
+  const alignedPriceQ96 =
+    params.tickSpacing === undefined
+      ? params.maxPriceQ96
+      : alignPriceToTickBoundary(params.maxPriceQ96, params.tickSpacing);
+
   steps.push({
     label: "Submit bid",
     request: encodeSubmitBid({
       auction: params.auction,
-      maxPriceQ96: params.maxPriceQ96,
+      maxPriceQ96: alignedPriceQ96,
       amount: params.amount,
       owner: params.owner,
       isNativeCurrency: isNative,
       prevTickPriceQ96: params.prevTickPriceQ96,
       hookData: params.hookData,
+      tickSpacing: params.tickSpacing,
     }),
   });
 
@@ -389,6 +435,7 @@ export function describeBidBlocker(input: {
   amount: bigint;
   maxPriceQ96: bigint;
   floorPriceQ96: bigint;
+  tickSpacing?: bigint;
   readiness?: BidReadiness;
 }): string | null {
   if (input.status === "ended") return "This auction has ended - bidding is closed.";
@@ -397,6 +444,12 @@ export function describeBidBlocker(input: {
   if (input.maxPriceQ96 <= 0n) return "Enter a maximum price.";
   if (input.maxPriceQ96 < input.floorPriceQ96) {
     return "Your maximum price is below the auction's floor price.";
+  }
+  if (input.tickSpacing !== undefined) {
+    const aligned = alignPriceToTickBoundary(input.maxPriceQ96, input.tickSpacing);
+    if (aligned < input.floorPriceQ96) {
+      return "Your maximum price rounds down below the auction's floor price.";
+    }
   }
   if (input.readiness && !input.readiness.hasBalance) return "Insufficient balance.";
   return null;

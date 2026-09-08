@@ -19,7 +19,8 @@
     "bot": "pnpm --filter @beacon/telegram-bot dev",
     "agent": "pnpm --filter @beacon/bidding-agent dev",
     "sync:auctions": "pnpm --filter @beacon/cca-sdk sync",
-    "demo:embed": "pnpm --filter @beacon/cca-widget build && node -e \"require('fs').copyFileSync('packages/widget/dist/mount.global.js','apps/web/public/beacon-widget.js')\""
+    "demo:embed": "pnpm --filter @beacon/cca-widget build && node -e \"require('fs').copyFileSync('packages/widget/dist/mount.global.js','apps/web/public/beacon-widget.js')\"",
+    "deploy:demo": "pnpm --filter @beacon/cca-sdk deploy:demo"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.0",
