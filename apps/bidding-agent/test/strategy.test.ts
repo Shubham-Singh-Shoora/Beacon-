@@ -1,4 +1,4 @@
-import { decimalToQ96, formatQ96, Q96 } from "@beacon/cca-sdk";
+import { decimalToQ96, formatQ96, Q96 } from "@hammerock/cca-sdk";
 import { describe, expect, it } from "vitest";
 import { applyBid, decide, remainingBudget, triggerThresholdQ96 } from "../src/strategy";
 import type { MarketSnapshot, StrategyConfig, StrategyState } from "../src/strategy";

@@ -12,7 +12,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@beacon/cca-sdk": "workspace:*",
+    "@hammerock/cca-sdk": "workspace:*",
     "dotenv": "^17.2.3",
     "grammy": "^1.39.0",
     "viem": "^2.40.0"

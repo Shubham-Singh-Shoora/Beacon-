@@ -1,281 +1,441 @@
 import Link from "next/link";
-import { formatQ96Compact, formatTokenAmount } from "@beacon/cca-sdk";
-import type { AuctionStatus } from "@beacon/cca-sdk";
-import { getDirectory, getListStates } from "@/lib/beacon";
-import { ClearedIndicator, GraduationBadge, StatusBadge } from "@/components/Badges";
+import { formatQ96Compact, formatTokenAmount } from "@hammerock/cca-sdk";
+import type { AuctionListState, AuctionStatus, Address } from "@hammerock/cca-sdk";
+import { getDirectory, getListStates, getNetworkCounts, resolveNetwork } from "@/lib/beacon";
+import { GraduationBadge, StatusBadge } from "@/components/Badges";
+import { BeaconVisual } from "@/components/BeaconVisual";
+import { DirectoryControls } from "@/components/DirectoryControls";
+import { Icon } from "@/components/Icons";
+import { TokenAvatar } from "@/components/TokenAvatar";
 
 export const dynamic = "force-dynamic";
-
-const PAGE_SIZE = 25;
-
+const PAGE_SIZE = 12;
 type Filter = AuctionStatus | "all" | "graduated";
-
 const FILTERS: Array<{ key: Filter; label: string }> = [
-  { key: "all", label: "All" },
+  { key: "all", label: "All auctions" },
   { key: "live", label: "Live" },
   { key: "pending", label: "Upcoming" },
   { key: "ended", label: "Ended" },
   { key: "graduated", label: "Graduated" },
 ];
 
-function shortAddress(address: string): string {
-  return `${address.slice(0, 6)}...${address.slice(-4)}`;
-}
-
 export default async function Home({
   searchParams,
 }: {
-  searchParams: Promise<{ filter?: string; page?: string; q?: string }>;
+  searchParams: Promise<{
+    chain?: string;
+    filter?: string;
+    page?: string;
+    q?: string;
+    sort?: string;
+    view?: string;
+  }>;
 }) {
   const params = await searchParams;
-  const filter = (FILTERS.find((f) => f.key === params.filter)?.key ?? "all") as Filter;
-  const page = Math.max(1, Number(params.page ?? 1) || 1);
+  const filter = FILTERS.find((f) => f.key === params.filter)?.key ?? "all";
+  const page = Math.max(1, Math.floor(Number(params.page) || 1));
   const query = (params.q ?? "").trim().toLowerCase();
-
-  const directory = await getDirectory();
-
-  if (directory.empty) {
-    return (
-      <main className="mx-auto max-w-5xl px-6 py-16">
-        <h1 className="text-3xl font-semibold tracking-tight">Beacon</h1>
-        <div className="mt-8 rounded-lg border border-neutral-800 bg-neutral-900/50 p-6">
-          <p className="font-medium">No auctions indexed yet.</p>
-          <p className="mt-2 text-sm text-neutral-400">
-            Run <code className="rounded bg-neutral-800 px-1.5 py-0.5">pnpm sync:auctions</code> to
-            scan the factory&apos;s <code>AuctionCreated</code> events and build the local store.
-          </p>
-        </div>
-      </main>
-    );
-  }
-
-  // Text search across token symbol, auction address and token address.
-  const searched = query
-    ? directory.entries.filter(
-        (e) =>
-          e.token.symbol.toLowerCase().includes(query) ||
-          e.auction.toLowerCase().includes(query) ||
-          e.info.token.toLowerCase().includes(query),
-      )
-    : directory.entries;
-
-  // Graduation is live state, so that filter needs the states first. Fetch the
-  // cheap multicall state for the filtered set before paginating on it.
-  const needsGraduation = filter === "graduated";
-  const preStates = needsGraduation
-    ? await getListStates(searched.slice(0, 150).map((e) => e.auction))
-    : new Map();
-
-  const filtered = searched.filter((entry) => {
-    if (filter === "all") return true;
-    if (filter === "graduated") return preStates.get(entry.auction)?.isGraduated === true;
-    return entry.status === filter;
-  });
-
+  const sort = params.sort === "oldest" ? "oldest" : "newest";
+  const view = params.view === "grid" ? "grid" : "list";
+  const network = resolveNetwork(params.chain);
+  const [directory, networkCounts] = await Promise.all([getDirectory(network), getNetworkCounts()]);
+  const searched = directory.entries.filter(
+    (e) =>
+      !query ||
+      [e.token.symbol, e.token.name, e.auction, e.info.token].some((value) =>
+        value.toLowerCase().includes(query),
+      ),
+  );
+  if (sort === "oldest") searched.reverse();
+  const preStates: Map<Address, AuctionListState> =
+    filter === "graduated" ? await getListStates(network, searched.map((e) => e.auction)) : new Map();
+  const graduationUnavailable =
+    filter === "graduated" && searched.some((entry) => !preStates.has(entry.auction));
+  const filtered = searched.filter(
+    (entry) =>
+      filter === "all" ||
+      (filter === "graduated"
+        ? preStates.get(entry.auction)?.isGraduated === true
+        : entry.status === filter),
+  );
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const current = Math.min(page, totalPages);
   const rows = filtered.slice((current - 1) * PAGE_SIZE, current * PAGE_SIZE);
-
-  const states = needsGraduation ? preStates : await getListStates(rows.map((e) => e.auction));
-  const graduatedOnPage = rows.filter((r) => states.get(r.auction)?.isGraduated).length;
-
-  const buildHref = (next: Partial<{ filter: Filter; page: number; q: string }>) => {
+  const states =
+    filter === "graduated" ? preStates : await getListStates(network, rows.map((e) => e.auction));
+  const href = (next: { filter?: Filter; page?: number }) => {
     const sp = new URLSearchParams();
+    sp.set("chain", network.slug);
     const f = next.filter ?? filter;
     if (f !== "all") sp.set("filter", f);
-    const p = next.page ?? 1;
-    if (p > 1) sp.set("page", String(p));
-    const q = next.q ?? params.q ?? "";
-    if (q) sp.set("q", q);
-    const s = sp.toString();
-    return s ? `/?${s}` : "/";
+    if ((next.page ?? 1) > 1) sp.set("page", String(next.page));
+    if (params.q) sp.set("q", params.q);
+    if (sort !== "newest") sp.set("sort", sort);
+    if (view !== "list") sp.set("view", view);
+    return `/${sp.size ? `?${sp}` : ""}#auctions`;
   };
 
   return (
-    <main className="mx-auto max-w-6xl px-6 py-12">
-      <header>
-        <h1 className="text-3xl font-semibold tracking-tight">Beacon</h1>
-        <p className="mt-2 text-neutral-400">
-          Every Uniswap Continuous Clearing Auction ever deployed on{" "}
-          <span className="text-neutral-300">Sepolia</span> — live and historical.
-        </p>
-      </header>
-
-      {/* Ended is the normal state here, so say so plainly rather than showing
-          an empty "live auctions" screen that reads like something is broken. */}
-      {directory.counts.live === 0 ? (
-        <div className="mt-6 rounded-lg border border-neutral-800 bg-neutral-900/40 px-4 py-3 text-sm">
-          <span className="text-neutral-300">No auctions are open right now.</span>{" "}
-          <span className="text-neutral-500">
-            {directory.counts.ended} {directory.counts.ended === 1 ? "has" : "have"} closed and{" "}
-            {directory.counts.pending} {directory.counts.pending === 1 ? "is" : "are"} scheduled.
-            Beacon is a historical record as much as a live one — closed auctions keep their final
-            clearing price and outcome.
-          </span>
+    <main id="main-content">
+      <section className="hero page-width">
+        <div className="hero-copy reveal">
+          <div className="eyebrow">
+            <span className="pink-dot" /> THE ONCHAIN AUCTION EXPLORER
+          </div>
+          <h1>
+            A new wave of
+            <br />
+            <span>token discovery.</span>
+          </h1>
+          <p>
+            Great things start in the open. Discover token auctions,
+            <br className="desktop-break" /> follow every launch, and see what comes next.
+          </p>
+          <div className="hero-actions">
+            <Link href="#auctions" className="button button-primary">
+              Explore auctions <Icon name="arrow" />
+            </Link>
+            <Link href="/learn" className="text-link">
+              How it works <Icon name="external" width="18" height="18" />
+            </Link>
+          </div>
+          <div className="hero-note">
+            <Icon name="globe" width="14" height="14" /> Permissionless. Transparent. Onchain.
+          </div>
         </div>
-      ) : null}
-
-      <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <Stat label="Auctions" value={directory.counts.all} />
-        <Stat label="Live" value={directory.counts.live} />
-        <Stat label="Upcoming" value={directory.counts.pending} />
-        <Stat label="Ended" value={directory.counts.ended} />
-      </div>
-
-      <nav className="mt-8 flex flex-wrap items-center gap-2">
-        {FILTERS.map((f) => (
-          <Link
-            key={f.key}
-            href={buildHref({ filter: f.key, page: 1 })}
-            className={`rounded-full px-3 py-1.5 text-sm ring-1 ring-inset transition ${
-              filter === f.key
-                ? "bg-neutral-100 text-neutral-900 ring-neutral-100"
-                : "bg-neutral-900 text-neutral-300 ring-neutral-800 hover:bg-neutral-800"
-            }`}
-          >
-            {f.label}
-            {f.key !== "graduated" ? (
-              <span className="ml-1.5 text-xs opacity-60">
-                {f.key === "all" ? directory.counts.all : directory.counts[f.key]}
-              </span>
-            ) : null}
-          </Link>
-        ))}
-
-        <form className="ml-auto" action="/">
-          {filter !== "all" ? <input type="hidden" name="filter" value={filter} /> : null}
-          <input
-            name="q"
-            defaultValue={params.q ?? ""}
-            placeholder="Search token or address"
-            className="w-56 rounded-md border border-neutral-800 bg-neutral-900 px-3 py-1.5 text-sm placeholder:text-neutral-600 focus:border-neutral-600 focus:outline-none"
+        <BeaconVisual />
+      </section>
+      <div className="page-width">
+        <section className="stats-strip reveal" aria-label="Auction overview">
+          <Stat
+            label="Auctions discovered"
+            value={directory.counts.all}
+            icon="layers"
+            detail="Every launch, one place"
           />
-        </form>
-      </nav>
-
-      <div className="mt-4 overflow-x-auto rounded-lg border border-neutral-800">
-        <table className="w-full min-w-[900px] text-sm">
-          <thead className="bg-neutral-900/60 text-left text-xs uppercase tracking-wide text-neutral-500">
-            <tr>
-              <th className="px-4 py-3 font-medium">Token</th>
-              <th className="px-4 py-3 font-medium">Status</th>
-              <th className="px-4 py-3 font-medium">Clearing price</th>
-              <th className="px-4 py-3 font-medium">Raised</th>
-              <th className="px-4 py-3 font-medium">Cleared</th>
-              <th className="px-4 py-3 font-medium">Auction</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-neutral-800/70">
-            {rows.map((entry) => {
-              const state = states.get(entry.auction);
-              const hasCleared = (state?.totalCleared ?? 0n) > 0n;
-              return (
-                <tr key={entry.auction} className="hover:bg-neutral-900/40">
-                  <td className="px-4 py-3">
-                    <Link
-                      href={`/auction/${entry.auction}`}
-                      className="font-medium text-neutral-100 hover:underline"
-                    >
-                      {entry.token.symbol}
-                    </Link>
-                    <div className="text-xs text-neutral-500">
-                      {formatTokenAmount(entry.info.totalSupply, entry.token)} offered
-                    </div>
-                  </td>
-                  <td className="px-4 py-3">
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <StatusBadge status={entry.status} />
-                      <GraduationBadge
-                        isGraduated={state?.isGraduated ?? false}
-                        status={entry.status}
-                      />
-                    </div>
-                  </td>
-                  <td className="px-4 py-3">
-                    {state ? (
-                      <>
-                        <span className="tabular-nums">
-                          {formatQ96Compact(state.clearingPriceQ96)}
-                        </span>{" "}
-                        <span className="text-xs text-neutral-500">{entry.currency.symbol}</span>
-                      </>
-                    ) : (
-                      <span className="text-neutral-600">—</span>
-                    )}
-                  </td>
-                  <td className="px-4 py-3 tabular-nums">
-                    {state ? (
-                      formatTokenAmount(state.currencyRaised, entry.currency)
-                    ) : (
-                      <span className="text-neutral-600">—</span>
-                    )}
-                  </td>
-                  <td className="px-4 py-3">
-                    {state ? (
-                      hasCleared ? (
-                        <span className="tabular-nums">
-                          {formatTokenAmount(state.totalCleared, entry.token)}
+          <Stat
+            label={directory.isStale ? "Live at last index" : "Live now"}
+            value={directory.counts.live}
+            icon="sparkles"
+            detail={
+              directory.isStale
+                ? "Awaiting network updates"
+                : directory.counts.live
+                  ? "Price discovery in motion"
+                  : "Between new beginnings"
+            }
+            live
+          />
+          <Stat
+            label={directory.isStale ? "Scheduled at last index" : "Coming up"}
+            value={directory.counts.pending}
+            icon="clock"
+            detail="The next wave of launches"
+          />
+          <Stat
+            label="Auctions completed"
+            value={directory.counts.ended}
+            icon="check"
+            detail="A permanent onchain record"
+          />
+        </section>
+        <section id="auctions" className="auction-section">
+          <div className="section-heading">
+            <div>
+              <div className="eyebrow muted">A WORLD OF POSSIBILITY</div>
+              <h2>
+                Find your next beginning<span className="pink-text">.</span>
+              </h2>
+            </div>
+            <span className="data-label">
+              <span className={directory.isStale ? "status-dot" : "network-dot"} />{" "}
+              {directory.isStale ? "Cached network snapshot" : "Onchain data"}
+              <span className="label-divider" /> {network.name}
+              {network.testnet ? " testnet" : ""}
+            </span>
+          </div>
+          <nav className="filter-tabs chain-tabs" aria-label="Choose network">
+            {networkCounts.map(({ network: n, all, live }) => (
+              <a
+                key={n.slug}
+                href={`/?chain=${n.slug}#auctions`}
+                className={n.slug === network.slug ? "active" : ""}
+                aria-current={n.slug === network.slug ? "page" : undefined}
+                title={n.testnet ? `${n.name} (test network)` : n.name}
+              >
+                {live > 0 && <span className="network-dot" />}
+                {n.name}
+                {n.testnet && <span className="muted"> · test</span>}
+                <span className="filter-count">{all}</span>
+              </a>
+            ))}
+          </nav>
+          <div className="directory-toolbar">
+            <nav className="filter-tabs" aria-label="Filter auctions">
+              {FILTERS.map((f) => (
+                <a
+                  key={f.key}
+                  href={href({ filter: f.key })}
+                  className={filter === f.key ? "active" : ""}
+                  aria-current={filter === f.key ? "page" : undefined}
+                >
+                  {f.key === "live" && <span className="network-dot" />}
+                  {f.label}
+                  {f.key === "all" && <span className="filter-count">{directory.counts.all}</span>}
+                </a>
+              ))}
+            </nav>
+            <DirectoryControls
+              chain={network.slug}
+              query={params.q ?? ""}
+              filter={filter}
+              sort={sort}
+              view={view}
+            />
+          </div>
+          {directory.isStale && (
+            <div className="notice">
+              <Icon name="clock" />
+              <p>
+                Network updates are temporarily unavailable. Statuses reflect the last indexed
+                block; live prices may be unavailable.
+              </p>
+            </div>
+          )}
+          {graduationUnavailable && (
+            <div className="notice">
+              <Icon name="clock" />
+              <p>
+                Some auction outcomes could not be loaded. Only verified graduated auctions are
+                shown.
+              </p>
+            </div>
+          )}
+          {!directory.isStale && directory.counts.live === 0 && filter === "all" && (
+            <div className="directory-note">
+              <span className="quiet-dot" /> A little quiet, a lot to discover. Explore completed
+              auctions while the next launches take shape.
+              <Link href="/learn">
+                Meet continuous auctions <Icon name="arrow" width="14" height="14" />
+              </Link>
+            </div>
+          )}
+          {rows.length > 0 ? (
+            <div className={`auction-results ${view === "grid" ? "results-grid" : "results-list"}`}>
+              <div className="table-heading">
+                <span>Token / Auction</span>
+                <span>Status</span>
+                <span>Clearing price</span>
+                <span>Total raised</span>
+                <span>Tokens cleared</span>
+                <span />
+              </div>
+              {rows.map((entry) => {
+                const state = states.get(entry.auction);
+                return (
+                  <article className="auction-row" key={entry.auction}>
+                    <div className="token-cell">
+                      <TokenAvatar symbol={entry.token.symbol} address={entry.info.token} />
+                      <div>
+                        <Link href={`/auction/${entry.auction}?chain=${network.slug}`} className="token-name">
+                          {entry.token.symbol}
+                          <Icon name="external" width="14" height="14" />
+                        </Link>
+                        <span className="token-subtitle" title={entry.token.name}>
+                          {entry.token.name}
                         </span>
-                      ) : (
-                        <ClearedIndicator hasCleared={false} />
-                      )
-                    ) : (
-                      <span className="text-neutral-600">—</span>
-                    )}
-                  </td>
-                  <td className="px-4 py-3 font-mono text-xs text-neutral-500">
-                    {shortAddress(entry.auction)}
-                  </td>
-                </tr>
-              );
-            })}
-            {rows.length === 0 ? (
-              <tr>
-                <td colSpan={6} className="px-4 py-12 text-center text-neutral-500">
-                  No auctions match this filter.
-                </td>
-              </tr>
-            ) : null}
-          </tbody>
-        </table>
-      </div>
-
-      <div className="mt-4 flex items-center justify-between text-sm text-neutral-500">
-        <span>
-          {filtered.length} auction{filtered.length === 1 ? "" : "s"}
-          {graduatedOnPage > 0 ? ` · ${graduatedOnPage} graduated on this page` : ""}
-        </span>
-        <div className="flex items-center gap-3">
-          {current > 1 ? (
-            <Link href={buildHref({ page: current - 1 })} className="hover:text-neutral-200">
-              ← Previous
+                        <span className="token-address">
+                          {entry.auction.slice(0, 6)}…{entry.auction.slice(-4)}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="status-cell">
+                      <StatusBadge status={entry.status} />
+                      {state && (
+                        <GraduationBadge isGraduated={state.isGraduated} status={entry.status} />
+                      )}
+                    </div>
+                    <div className="metric-cell">
+                      <span className="mobile-metric-label">Clearing price</span>
+                      <strong>{state ? formatQ96Compact(state.clearingPriceQ96) : "—"}</strong>
+                      <span>
+                        {state
+                          ? `${entry.currency.symbol} per ${entry.token.symbol}`
+                          : "Unavailable"}
+                      </span>
+                    </div>
+                    <div className="metric-cell">
+                      <span className="mobile-metric-label">Total raised</span>
+                      <strong>
+                        {state ? formatTokenAmount(state.currencyRaised, entry.currency) : "—"}
+                      </strong>
+                      <span>{formatTokenAmount(entry.info.totalSupply, entry.token)} offered</span>
+                    </div>
+                    <div className="metric-cell cleared-cell">
+                      <span className="mobile-metric-label">Tokens cleared</span>
+                      <strong>
+                        {state ? formatTokenAmount(state.totalCleared, entry.token) : "—"}
+                      </strong>
+                      <span>
+                        {state
+                          ? state.totalCleared > 0n
+                            ? "Supply distributed"
+                            : "No supply distributed"
+                          : "Unavailable"}
+                      </span>
+                    </div>
+                    <Link
+                      href={`/auction/${entry.auction}?chain=${network.slug}`}
+                      className="row-arrow"
+                      aria-label={`View ${entry.token.symbol} auction ${entry.auction.slice(-4)}`}
+                    >
+                      <Icon name="arrow" width="18" height="18" />
+                    </Link>
+                  </article>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="empty-state">
+              <span className="empty-icon">
+                <Icon name={query ? "search" : "sparkles"} width="30" height="30" />
+              </span>
+              <h3>
+                {directory.empty
+                  ? "Every beginning starts somewhere."
+                  : query
+                    ? "No discoveries just yet."
+                    : filter === "live"
+                      ? "The next wave is on its way."
+                      : "Nothing here just yet."}
+              </h3>
+              <p>
+                {directory.empty
+                  ? "New auctions will appear here as they are indexed. Check back soon."
+                  : query
+                    ? "Try another token name, symbol, or contract address."
+                    : filter === "live"
+                      ? "There are no live auctions right now. Explore the stories of past launches."
+                      : "Explore all auctions to see more token launches."}
+              </p>
+              <Link href={`/?chain=${network.slug}#auctions`} className="button button-soft">
+                {directory.empty ? "Refresh directory" : "Explore all auctions"}
+                <Icon name="arrow" />
+              </Link>
+            </div>
+          )}
+          <div className="pagination">
+            <span>
+              {filtered.length
+                ? `${(current - 1) * PAGE_SIZE + 1}–${Math.min(current * PAGE_SIZE, filtered.length)} of ${filtered.length} auctions`
+                : "0 auctions"}
+            </span>
+            <div>
+              {current > 1 ? (
+                <a
+                  href={href({ page: current - 1 })}
+                  className="icon-button"
+                  aria-label="Previous page"
+                >
+                  <Icon name="arrow" className="arrow-back" width="16" height="16" />
+                </a>
+              ) : (
+                <span className="icon-button disabled" aria-hidden="true">
+                  <Icon name="arrow" className="arrow-back" width="16" height="16" />
+                </span>
+              )}
+              <span>
+                Page <strong>{current}</strong> of {totalPages}
+              </span>
+              {current < totalPages ? (
+                <a
+                  href={href({ page: current + 1 })}
+                  className="icon-button"
+                  aria-label="Next page"
+                >
+                  <Icon name="arrow" width="16" height="16" />
+                </a>
+              ) : (
+                <span className="icon-button disabled" aria-hidden="true">
+                  <Icon name="arrow" width="16" height="16" />
+                </span>
+              )}
+            </div>
+          </div>
+          <div className="index-note">
+            <span className="network-dot" /> Indexed through block{" "}
+            {directory.lastSyncedBlock.toLocaleString("en-US")}
+            <span>·</span>
+            {directory.isStale
+              ? "Awaiting network connection"
+              : `Network block ${directory.headBlock.toLocaleString("en-US")}`}
+          </div>
+        </section>
+        <section className="discovery-banner">
+          <div className="banner-art" aria-hidden="true">
+            <div />
+            <div />
+            <div />
+            <span>✳</span>
+          </div>
+          <div>
+            <span className="eyebrow">FAIRER STARTS. OPEN POSSIBILITIES.</span>
+            <h2>
+              Good ideas deserve
+              <br />a great beginning.
+            </h2>
+            <p>
+              Get to know a different way to launch.
+              <br />
+              Continuous auctions. Transparent price discovery.
+            </p>
+            <Link href="/learn" className="text-link">
+              Discover how it works <Icon name="arrow" />
             </Link>
-          ) : null}
-          <span>
-            Page {current} of {totalPages}
-          </span>
-          {current < totalPages ? (
-            <Link href={buildHref({ page: current + 1 })} className="hover:text-neutral-200">
-              Next →
-            </Link>
-          ) : null}
-        </div>
+          </div>
+          <Link href="/developers" className="builder-callout">
+            <span className="builder-icon">
+              <Icon name="code" />
+            </span>
+            <h3>Made for builders.</h3>
+            <p>
+              Bring auction data to your world
+              <br />
+              with the Beacon SDK and widget.
+            </p>
+            <span>
+              Start building <Icon name="external" width="17" height="17" />
+            </span>
+          </Link>
+        </section>
       </div>
-
-      <footer className="mt-10 text-xs text-neutral-600">
-        Indexed to block {directory.lastSyncedBlock.toString()} · chain head{" "}
-        {directory.headBlock.toString()} · discovery via the factory&apos;s{" "}
-        <code>AuctionCreated</code> event
-      </footer>
     </main>
   );
 }
-
-function Stat({ label, value }: { label: string; value: number }) {
+function Stat({
+  label,
+  value,
+  icon,
+  detail,
+  live = false,
+}: {
+  label: string;
+  value: number;
+  icon: React.ComponentProps<typeof Icon>["name"];
+  detail: string;
+  live?: boolean;
+}) {
   return (
-    <div className="rounded-lg border border-neutral-800 bg-neutral-900/40 px-4 py-3">
-      <div className="text-xs uppercase tracking-wide text-neutral-500">{label}</div>
-      <div className="mt-1 text-2xl font-semibold tabular-nums">{value}</div>
+    <div className="stat">
+      <div className="stat-label">
+        {label}
+        <Icon name={icon} width="16" height="16" />
+      </div>
+      <div className="stat-value">
+        {value.toLocaleString("en-US")}
+        {live && <span className={value > 0 ? "live-indicator" : "inactive-indicator"} />}
+      </div>
+      <p>{detail}</p>
     </div>
   );
 }

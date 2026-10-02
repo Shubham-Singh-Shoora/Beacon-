@@ -35,6 +35,7 @@ import {
   auctionCreatedEvent,
   buildAuctionSteps,
   createBeaconClient,
+  LEGACY_V1_FACTORY_ADDRESS,
   encodeAuctionParameters,
   factoryAbi,
   formatQ96,
@@ -103,12 +104,15 @@ async function main(): Promise<void> {
     throw new Error(`RPC reports chain id ${reportedChainId}, which is not an allowed testnet.`);
   }
 
-  // Reuse the SDK's client purely for chain metadata and the factory address.
+  // Reuse the SDK's client purely for chain metadata.
   const beacon = createBeaconClient({
     rpcUrl: RPC_URL,
     chainId: CHAIN_ID === 31337 ? 11155111 : CHAIN_ID,
   });
-  const factoryAddress = beacon.factoryAddress;
+  // This script drives `initializeDistribution`, which only the deprecated
+  // v1.1.0 factory has - v2 moved auction creation behind Uniswap's
+  // LiquidityLauncher. The auction it makes is a real, biddable v1.1.0 auction.
+  const factoryAddress = LEGACY_V1_FACTORY_ADDRESS;
 
   const head = await publicClient.getBlockNumber();
   const startBlock = head + BigInt(START_DELAY_BLOCKS);

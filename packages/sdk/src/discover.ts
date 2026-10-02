@@ -11,6 +11,7 @@
 import { getAbiItem } from "viem";
 import type { Address, Log } from "viem";
 import { factoryAbi } from "./abis";
+import { requireFactoryDeployBlock } from "./client";
 import type { BeaconClient } from "./client";
 import { DEFAULT_LOG_CHUNK_SIZE } from "./constants";
 import type { DiscoveredAuction } from "./types";
@@ -67,6 +68,7 @@ function toDiscoveredAuction(log: AuctionCreatedLog): DiscoveredAuction {
     token,
     amount: amount ?? 0n,
     configData: configData ?? "0x",
+    factory: log.address,
     blockNumber: log.blockNumber,
     transactionHash: log.transactionHash,
     logIndex: log.logIndex,
@@ -85,8 +87,8 @@ export async function scanAuctions(
   options: ScanOptions = {},
 ): Promise<DiscoveredAuction[]> {
   const headBlock = options.toBlock ?? (await client.publicClient.getBlockNumber());
-  const startBlock = options.fromBlock ?? client.factoryDeployBlock;
-  const maxChunk = options.chunkSize ?? DEFAULT_LOG_CHUNK_SIZE;
+  const startBlock = options.fromBlock ?? requireFactoryDeployBlock(client);
+  const maxChunk = options.chunkSize ?? client.logChunkSize ?? DEFAULT_LOG_CHUNK_SIZE;
 
   if (startBlock > headBlock) return [];
 
@@ -101,7 +103,8 @@ export async function scanAuctions(
     // Log scanning may use a different provider than state reads.
     const fetchChunk = async (from: bigint, to: bigint): Promise<AuctionCreatedLog[]> =>
       (await client.logsClient.getLogs({
-        address: client.factoryAddress,
+        // Every factory version at once - eth_getLogs takes an address list.
+        address: client.factoryAddresses,
         event: auctionCreatedEvent,
         fromBlock: from,
         toBlock: to,
@@ -175,7 +178,7 @@ export function watchAuctions(
   options: { pollingIntervalMs?: number; onError?: (error: Error) => void } = {},
 ): () => void {
   return client.logsClient.watchEvent({
-    address: client.factoryAddress,
+    address: client.factoryAddresses,
     event: auctionCreatedEvent,
     poll: true,
     pollingInterval: options.pollingIntervalMs ?? 12_000,

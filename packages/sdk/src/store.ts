@@ -29,6 +29,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { Address } from "viem";
+import { MAX_NAME_LENGTH, MAX_SYMBOL_LENGTH, sanitizeTokenText } from "./erc20";
 import type { TokenMetadata } from "./erc20";
 import type { AuctionInfo, DiscoveredAuction } from "./types";
 
@@ -42,6 +43,12 @@ export interface AuctionRecord extends DiscoveredAuction {
 export interface AuctionStoreSnapshot {
   chainId: number;
   factoryAddress: Address;
+  /**
+   * Every factory `lastSyncedBlock` is valid for. A factory missing from this
+   * list has never been scanned, so a sync must start again from the beginning
+   * rather than resume. Stores written before v0.2 hold only `factoryAddress`.
+   */
+  factoryAddresses: Address[];
   /** Highest block that has been scanned. Discovery resumes from here. */
   lastSyncedBlock: bigint;
   auctions: AuctionRecord[];
@@ -50,6 +57,7 @@ export interface AuctionStoreSnapshot {
 export interface StoreUpdate {
   chainId: number;
   factoryAddress: Address;
+  factoryAddresses: readonly Address[];
   lastSyncedBlock: bigint;
   auctions: readonly AuctionRecord[];
 }
@@ -97,6 +105,7 @@ function serializeRecord(record: AuctionRecord): Serialized {
     token: record.token,
     amount: record.amount.toString(),
     configData: record.configData,
+    ...(record.factory ? { factory: record.factory } : {}),
     blockNumber: record.blockNumber.toString(),
     transactionHash: record.transactionHash,
     logIndex: record.logIndex,
@@ -106,18 +115,30 @@ function serializeRecord(record: AuctionRecord): Serialized {
   };
 }
 
+function sanitizeMeta(meta: TokenMetadata | undefined): TokenMetadata | undefined {
+  if (!meta) return undefined;
+  const fallback = `${meta.address.slice(0, 6)}…${meta.address.slice(-4)}`;
+  return {
+    ...meta,
+    symbol: sanitizeTokenText(meta.symbol, MAX_SYMBOL_LENGTH) ?? fallback,
+    name: sanitizeTokenText(meta.name, MAX_NAME_LENGTH) ?? fallback,
+  };
+}
+
 function deserializeRecord(raw: Serialized): AuctionRecord {
   return {
     auction: raw.auction as Address,
     token: raw.token as Address,
     amount: BigInt(raw.amount as string),
     configData: raw.configData as `0x${string}`,
+    factory: raw.factory as Address | undefined,
     blockNumber: BigInt(raw.blockNumber as string),
     transactionHash: raw.transactionHash as `0x${string}`,
     logIndex: raw.logIndex as number,
     info: raw.info ? deserializeInfo(raw.info as Serialized) : undefined,
-    tokenMeta: raw.tokenMeta as TokenMetadata | undefined,
-    currencyMeta: raw.currencyMeta as TokenMetadata | undefined,
+    // Re-sanitised on read: stores written before v0.2 cached names raw.
+    tokenMeta: sanitizeMeta(raw.tokenMeta as TokenMetadata | undefined),
+    currencyMeta: sanitizeMeta(raw.currencyMeta as TokenMetadata | undefined),
   };
 }
 
@@ -174,6 +195,7 @@ export class JsonAuctionStore implements AuctionStore {
     const parsed = JSON.parse(raw) as {
       chainId: number;
       factoryAddress: Address;
+      factoryAddresses?: Address[];
       lastSyncedBlock: string;
       auctions: Serialized[];
     };
@@ -181,6 +203,7 @@ export class JsonAuctionStore implements AuctionStore {
     return {
       chainId: parsed.chainId,
       factoryAddress: parsed.factoryAddress,
+      factoryAddresses: parsed.factoryAddresses ?? [parsed.factoryAddress],
       lastSyncedBlock: BigInt(parsed.lastSyncedBlock),
       auctions: sortRecords(parsed.auctions.map(deserializeRecord)),
     };
@@ -189,15 +212,12 @@ export class JsonAuctionStore implements AuctionStore {
   async merge(update: StoreUpdate): Promise<{ added: number; total: number }> {
     const existing = await this.read();
 
-    // A store built against a different chain or factory is not ours to merge.
-    if (
-      existing &&
-      (existing.chainId !== update.chainId ||
-        existing.factoryAddress.toLowerCase() !== update.factoryAddress.toLowerCase())
-    ) {
+    // A store built for a different chain is not ours to merge. Factories may
+    // differ: a store gains a factory when a new CCA version ships.
+    if (existing && existing.chainId !== update.chainId) {
       throw new Error(
-        `Auction store at ${this.filePath} holds chain ${existing.chainId}/${existing.factoryAddress}, ` +
-          `refusing to merge chain ${update.chainId}/${update.factoryAddress}.`,
+        `Auction store at ${this.filePath} holds chain ${existing.chainId}, ` +
+          `refusing to merge chain ${update.chainId}.`,
       );
     }
 
@@ -217,6 +237,7 @@ export class JsonAuctionStore implements AuctionStore {
         {
           chainId: update.chainId,
           factoryAddress: update.factoryAddress,
+          factoryAddresses: update.factoryAddresses,
           lastSyncedBlock: watermark.toString(),
           auctions: merged.map(serializeRecord),
         },
@@ -248,6 +269,7 @@ export class MemoryAuctionStore implements AuctionStore {
     this.snapshot = {
       chainId: update.chainId,
       factoryAddress: update.factoryAddress,
+      factoryAddresses: [...update.factoryAddresses],
       lastSyncedBlock: watermark,
       auctions: merged,
     };

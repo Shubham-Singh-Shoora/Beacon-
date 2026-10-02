@@ -28,6 +28,33 @@ export interface TokenMetadata {
 }
 
 /**
+ * Make an on-chain token string safe to show.
+ *
+ * `symbol()` and `name()` are whatever the token's deployer chose. Real CCA
+ * auctions on Sepolia carry names stuffed with HTML/script markup aimed at web
+ * frontends, and a name can just as easily hold terminal escape codes or
+ * Unicode bidi overrides that make one address render as another. So: drop
+ * markup, control and invisible/bidi characters, collapse whitespace, and cap
+ * the length. Returns `undefined` when nothing readable is left.
+ */
+export function sanitizeTokenText(raw: string, maxLength: number): string | undefined {
+  const cleaned = raw
+    .replace(/<[^>]*>?/g, " ")
+    // C0/C1 controls (incl. ESC for ANSI), zero-width, bidi overrides/isolates, BOM.
+    // Matching control characters is the point of this regex.
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (cleaned.length === 0) return undefined;
+  return cleaned.length > maxLength ? `${cleaned.slice(0, maxLength - 1)}…` : cleaned;
+}
+
+/** Longest symbol / name Beacon will display. */
+export const MAX_SYMBOL_LENGTH = 16;
+export const MAX_NAME_LENGTH = 48;
+
+/**
  * Read a currency's symbol, name and decimals.
  *
  * `address(0)` is the CCA sentinel for native currency, and resolves to the
@@ -64,8 +91,12 @@ export async function getTokenMetadata(
 
   return {
     address,
-    symbol: symbol.status === "success" ? symbol.result : shortAddress(address),
-    name: name.status === "success" ? name.result : shortAddress(address),
+    symbol:
+      (symbol.status === "success" && sanitizeTokenText(symbol.result, MAX_SYMBOL_LENGTH)) ||
+      shortAddress(address),
+    name:
+      (name.status === "success" && sanitizeTokenText(name.result, MAX_NAME_LENGTH)) ||
+      shortAddress(address),
     // 18 is the overwhelmingly common default; better than refusing to render.
     decimals: decimals.status === "success" ? Number(decimals.result) : 18,
     isNative: false,

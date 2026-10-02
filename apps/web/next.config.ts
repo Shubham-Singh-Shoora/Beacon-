@@ -8,8 +8,11 @@ import type { NextConfig } from "next";
 loadEnv({ path: resolve(process.cwd(), "../../.env"), quiet: true });
 
 const nextConfig: NextConfig = {
+  outputFileTracingRoot: resolve(process.cwd(), "../.."),
+  // One committed store per chain (data/auctions.<slug>.json); the server reads them at request time.
+  outputFileTracingIncludes: { "/*": ["../../data/auctions.*.json"] },
   // Workspace packages ship TypeScript source, not dist - Next compiles them.
-  transpilePackages: ["@beacon/cca-sdk", "@beacon/cca-widget"],
+  transpilePackages: ["@hammerock/cca-sdk", "@hammerock/cca-widget"],
 };
 
 export default nextConfig;

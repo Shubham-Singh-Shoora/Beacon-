@@ -23,10 +23,9 @@ out/
 # Ignore the contents, not the directory itself - git will not descend into an
 # ignored directory, so a `!` negation below it would never match.
 data/*
-# ...but the discovered-auction store IS committed: rebuilding it needs many
-# scans against an unreliable public RPC, so shipping it makes the directory
-# reproducible for anyone cloning the repo.
-!data/auctions.sepolia.json
+# ...but the discovered-auction stores ARE committed (one per chain): rebuilding
+# them needs a long history scan, and the deployed directory reads them.
+!data/auctions.*.json
 
 # Built widget bundle copied into the web app's public dir by `pnpm demo:embed`.
 apps/web/public/beacon-widget.js

@@ -11,7 +11,7 @@
  * the delivery are all the production path. Once Phase 5 deploys a live auction
  * this becomes redundant for the demo, but stays useful as a smoke test.
  */
-import { decimalToQ96 } from "@beacon/cca-sdk";
+import { decimalToQ96 } from "@hammerock/cca-sdk";
 import { evaluateAlerts } from "./alerts";
 import type { AlertThresholds, AuctionSnapshot } from "./alerts";
 import { renderAlert } from "./format";

@@ -1,130 +1,282 @@
 /**
- * Beacon bidding agent.
+ * `cca-agent` - watches one Uniswap CCA auction and bids when the clearing
+ * price comes within a configured band of the operator's price cap.
  *
- * Watches one CCA auction and submits a bid when the clearing price comes
- * within a configured band of the operator's price cap.
+ *   cca-agent init              guided setup, writes .env here
+ *   cca-agent status            live auction card
+ *   cca-agent simulate          drive the real strategy through a price walk
+ *   cca-agent plan              build the real bid transactions, never send
+ *   cca-agent run               watch and decide, send nothing
+ *   cca-agent run --live        watch and really bid
+ *   cca-agent settle            exit bids and claim tokens (dry run; --live sends)
  *
- *   pnpm agent -- --dry-run     read real state, build real calldata, send nothing
- *   pnpm agent -- --simulate    drive the real strategy through a scripted price walk
- *   pnpm agent -- --once        one decision cycle, then exit
- *   pnpm agent                  poll and (if AGENT_BROADCAST=true) bid
- *
- * TESTNET ONLY. The agent refuses to run against any chain id outside an
- * explicit testnet allowlist, enforces a hard max-spend cap, and never logs the
- * private key - only the address derived from it.
+ * Testnets and mainnets. A mainnet broadcast is locked until the operator
+ * opts in (--mainnet / AGENT_ALLOW_MAINNET=true) and then types the network
+ * name to confirm. A hard max-spend cap always applies, and the private key is
+ * never logged - only the address derived from it.
  */
-import { assertChainMatches, createBeaconClient, formatQ96, formatTokenAmount } from "@beacon/cca-sdk";
+import * as p from "@clack/prompts";
+import { createRequire } from "node:module";
+import { isAddress } from "viem";
+import type { Address } from "viem";
+import {
+  assertChainMatches,
+  createBeaconClient,
+  formatQ96,
+  formatTokenAmount,
+  rpcSettingsFromEnv,
+} from "@hammerock/cca-sdk";
 import { buildPlanForInspection, describeStrategy, loadContext, tick } from "./agent";
-import { ConfigError, loadConfig } from "./config";
-import { GuardError, assertTestnetOnly } from "./guards";
+import { ConfigError, isMainnetChain, loadConfig, loadEnvFile } from "./config";
+import { GuardError, assertChainAllowed } from "./guards";
+import { runInit } from "./init";
+import { runSettle } from "./settle";
+import { CMD } from "./invocation";
 import { runSimulation } from "./simulate";
 import type { StrategyState } from "./strategy";
+import { BRAND, auctionCard, cycleLine, info, pc, shortAddress } from "./ui";
+import { readAuctionView } from "./view";
 
-function log(message = ""): void {
-  console.log(message ? `[beacon-agent] ${message}` : "");
+const { version } = createRequire(import.meta.url)("../package.json") as { version: string };
+
+const COMMANDS = ["init", "status", "simulate", "plan", "run", "settle", "help"] as const;
+type Command = (typeof COMMANDS)[number];
+
+const HELP = `
+${BRAND} ${pc.dim(`v${version}`)}
+
+${pc.bold("Usage")}
+  ${CMD} <command> [options]
+
+${pc.bold("Commands")}
+  ${pc.cyan("init")}       Guided setup - writes a .env in this folder
+  ${pc.cyan("status")}     Show the auction's live state
+  ${pc.cyan("simulate")}   Run your strategy through a scripted price walk
+  ${pc.cyan("plan")}       Build the real bid transactions and print them
+  ${pc.cyan("run")}        Watch the auction and decide - sends nothing
+  ${pc.cyan("run --live")} Watch the auction and really bid
+  ${pc.cyan("settle")}     Exit your bids and claim tokens - dry run; ${pc.cyan("--live")} sends
+
+${pc.bold("Options")}
+  --env <path>       Use this .env instead of ./.env
+  --auction <addr>   Override AGENT_AUCTION_ADDRESS (status, settle)
+  --owner <addr>     Whose bids to settle (settle; default: your key's address)
+  --bid <ids>        Settle only these bid ids, e.g. 3,7 (settle)
+  --once             One decision, then exit (run)
+  --mainnet          Allow live bidding or settling on a mainnet (real money)
+  --yes              Skip the confirmation before live bidding
+  -v, --version      Print the version
+
+${pc.bold("Your private key")}
+  Read only from AGENT_PRIVATE_KEY (in .env or your shell). It never leaves
+  this machine and is never printed - only the wallet address is.
+
+${pc.bold("Networks")}
+  Testnets  Sepolia, Base Sepolia, Unichain Sepolia
+  Mainnets  Ethereum, Base, Unichain, Arbitrum ${pc.yellow("- real money")}
+  Reading a mainnet needs nothing. Live bidding there needs ${pc.cyan("--mainnet")}
+  (or AGENT_ALLOW_MAINNET=true) and you typing the network name to confirm.
+`;
+
+interface Args {
+  command: Command;
+  flags: string[];
+  envPath?: string;
+  auction?: string;
+  owner?: string;
+  bidIds?: string;
+  yes: boolean;
 }
 
-async function main(): Promise<void> {
-  const config = loadConfig();
+function parseArgs(argv: string[]): Args {
+  const flags: string[] = [];
+  let command: Command | undefined;
+  let envPath: string | undefined;
+  let auction: string | undefined;
+  let owner: string | undefined;
+  let bidIds: string | undefined;
 
-  log("=".repeat(60));
-  log("TESTNET ONLY - this agent will not run against mainnet.");
-  log("=".repeat(60));
-  log(`chain    ${config.chainId}`);
-  log(`auction  ${config.auction}`);
-  // Only ever the derived address; the key itself is never printed.
-  log(`wallet   ${config.account?.address ?? "none loaded (dry run)"}`);
-  log(`mode     ${config.broadcast ? "BROADCAST - will send real transactions" : "DRY RUN - nothing will be sent"}`);
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]!;
+    if (arg === "--env") envPath = argv[++i];
+    else if (arg === "--auction") auction = argv[++i];
+    else if (arg === "--owner") owner = argv[++i];
+    else if (arg === "--bid") bidIds = argv[++i];
+    else if (arg === "-h" || arg === "--help") command = "help";
+    else if (arg.startsWith("-")) flags.push(arg);
+    else if (!command) {
+      if (!(COMMANDS as readonly string[]).includes(arg)) {
+        throw new ConfigError(`Unknown command "${arg}". Run "${CMD} help".`);
+      }
+      command = arg as Command;
+    }
+  }
 
+  // The pre-CLI flag forms (`--simulate`, `--plan`) still work on their own.
+  if (!command) {
+    if (flags.includes("--simulate")) command = "simulate";
+    else if (flags.includes("--plan")) command = "plan";
+    else if (flags.length > 0) command = "run";
+    else command = "help";
+  }
+  if (command === "simulate") flags.push("--simulate");
+  if (command === "plan") flags.push("--plan");
+
+  return { command, flags, envPath, auction, owner, bidIds, yes: flags.includes("--yes") };
+}
+
+async function status(args: Args): Promise<void> {
+  const auction = args.auction ?? process.env.AGENT_AUCTION_ADDRESS;
+  if (!auction || !isAddress(auction)) {
+    throw new ConfigError(`No auction. Pass --auction 0x… or run "${CMD} init".`);
+  }
+  const chainId = Number(process.env.BEACON_CHAIN_ID ?? 11155111);
+  const client = createBeaconClient({ chainId, ...rpcSettingsFromEnv(chainId) });
+  p.intro(BRAND);
+  const spin = p.spinner();
+  spin.start("Reading the auction");
+  await assertChainMatches(client);
+  const view = await readAuctionView(client, auction as Address);
+  spin.stop("Live state");
+  p.note(auctionCard(view), "Auction");
+  p.outro(pc.dim(`block ${view.headBlock}`));
+}
+
+async function agent(args: Args): Promise<void> {
+  const config = loadConfig(args.flags);
   const client = createBeaconClient({
     rpcUrl: config.rpcUrl,
+    fallbackRpcUrls: config.fallbackRpcUrls,
     chainId: config.chainId,
     lensAddress: config.lensAddress,
   });
 
-  // Fails closed on anything that is not an allowed testnet, checking both the
-  // configured id and the id the RPC actually reports.
-  await assertTestnetOnly(client, config);
+  p.intro(BRAND);
+  const spin = p.spinner();
+  spin.start("Checking network and auction");
+  // Fails closed on an unknown chain, and on a mainnet broadcast without the
+  // opt-in - checked against the id the RPC actually reports.
+  await assertChainAllowed(client, config);
   await assertChainMatches(client);
-  log("chain guard passed");
+  const [context, view] = await Promise.all([
+    loadContext(client, config),
+    readAuctionView(client, config.auction),
+  ]);
+  const mainnet = isMainnetChain(config.chainId);
+  spin.stop(`Connected to ${client.chain.name}${mainnet ? pc.yellow("  (mainnet - real money)") : ""}`);
 
-  const context = await loadContext(client, config);
-  log("");
-  log(`strategy:\n  ${describeStrategy(context)}`);
-  log("");
+  p.note(auctionCard(view), "Auction");
+  p.note(describeStrategy(context).replace(/\n {2}/g, "\n"), "Strategy");
 
   if (config.simulate) {
-    log("simulating a price walk through the real strategy...");
-    log("");
+    p.log.step("Simulating a price walk through the real strategy");
     const result = runSimulation(
       config.strategy,
       context.info.floorPriceQ96,
       context.currency,
-      (message) => console.log(message),
+      (message) => console.log(pc.dim("│ ") + message),
     );
-    log("");
-    log(
-      `simulation complete: ${result.bids} bid(s), ${formatTokenAmount(result.spent, context.currency)} committed ` +
-        `of ${formatTokenAmount(config.strategy.maxSpend, context.currency)} cap`,
+    p.outro(
+      `${result.bids} bid(s), ${formatTokenAmount(result.spent, context.currency)} committed of ` +
+        `${formatTokenAmount(config.strategy.maxSpend, context.currency)} budget`,
     );
     return;
   }
 
   if (config.plan) {
-    log("PLAN MODE - building the bid transactions, ignoring the auction lifecycle gate.");
-    log("Nothing is broadcast in this mode, ever.");
-    log("");
     const { steps, isNative, readiness, prevTickPriceQ96 } = await buildPlanForInspection(context);
-
-    log(`currency is ${isNative ? "NATIVE" : "an ERC-20"} -> ${steps.length} transaction(s)`);
-    log(`tick hint (prevTickPrice): ${prevTickPriceQ96} (${formatQ96(prevTickPriceQ96)})`);
+    const lines = [
+      `${isNative ? "Native currency" : "ERC-20 currency"} -> ${steps.length} transaction(s)`,
+      `tick hint ${formatQ96(prevTickPriceQ96)}`,
+    ];
     if (!isNative) {
-      log(
-        `permit2: erc20->permit2 approval needed=${readiness.needsErc20Approval}, ` +
-          `permit2->auction approval needed=${readiness.needsPermit2Approval}`,
+      lines.push(
+        `ERC-20 -> Permit2 approval ${readiness.needsErc20Approval ? "needed" : "done"}, ` +
+          `Permit2 -> auction ${readiness.needsPermit2Approval ? "needed" : "done"}`,
       );
     }
-    log("");
     for (const [index, step] of steps.entries()) {
-      log(`${index + 1}. ${step.label}`);
-      log(`   to    ${step.to}`);
-      log(`   value ${step.value}`);
-      log(`   data  ${step.data.slice(0, 74)}...`);
-      log(`   len   ${(step.data.length - 2) / 2} bytes, selector ${step.data.slice(0, 10)}`);
+      lines.push(
+        "",
+        `${pc.bold(`${index + 1}. ${step.label}`)}`,
+        `   to    ${step.to}`,
+        `   value ${step.value}`,
+        `   data  ${step.data.slice(0, 10)}… ${pc.dim(`${(step.data.length - 2) / 2} bytes`)}`,
+      );
     }
+    p.note(lines.join("\n"), "Plan - never sent");
+    p.outro("Nothing was broadcast.");
     return;
   }
 
+  const wallet = config.account?.address;
+  if (config.broadcast) {
+    const budget = formatTokenAmount(config.strategy.maxSpend, context.currency);
+    if (mainnet) {
+      p.log.error(
+        `${pc.bold(`MAINNET - ${client.chain.name.toUpperCase()}`)}: these bids spend REAL money.\n` +
+          `Wallet ${pc.bold(wallet!)}\n` +
+          `Up to ${pc.bold(budget)} plus gas, at no more than ${config.strategy.maxPriceInput} per token.\n` +
+          `Bids stay locked in the auction until they are settled. Afterwards, run\n` +
+          `${CMD} settle to collect refunds and tokens.`,
+      );
+    } else {
+      p.log.warn(`${pc.bold("LIVE")} - real transactions from ${pc.bold(shortAddress(wallet!))}, up to ${budget} plus gas.`);
+    }
+    if (!args.yes) {
+      if (!process.stdin.isTTY) {
+        throw new ConfigError("Live mode needs confirmation. Re-run with --yes to confirm non-interactively.");
+      }
+      if (mainnet) {
+        // Typing the network name, not pressing y: a reflexive Enter must not
+        // be able to start spending real money.
+        const expected = client.chain.name.toLowerCase();
+        const typed = await p.text({
+          message: `Type ${pc.bold(expected)} to start live bidding on mainnet`,
+          validate: (v) => ((v ?? "").trim().toLowerCase() === expected ? undefined : `Type "${expected}" exactly, or Ctrl+C`),
+        });
+        if (p.isCancel(typed)) {
+          p.cancel("Stopped - nothing was sent.");
+          return;
+        }
+      } else {
+        const ok = await p.confirm({ message: "Start live bidding?", initialValue: false });
+        if (p.isCancel(ok) || !ok) {
+          p.cancel("Stopped - nothing was sent.");
+          return;
+        }
+      }
+    }
+  } else {
+    p.log.info(`${pc.bold("Dry run")} - decides for real, sends nothing. Add ${pc.cyan("--live")} to bid.`);
+  }
+
   let state: StrategyState = { spent: 0n, bidsPlaced: 0 };
+  const explorer = client.chain.blockExplorers?.default?.url;
 
   async function cycle(): Promise<boolean> {
-    const result = await tick(context, state, { onLog: (m) => log(m) });
+    const result = await tick(context, state, { onLog: (m) => info(pc.dim(m)) });
     state = result.state;
 
-    log(
-      `status=${result.market.status} price=${formatQ96(result.market.clearingPriceQ96)} ` +
-        `-> ${result.decision.action.toUpperCase()}: ${result.decision.reason}`,
+    console.log(
+      cycleLine({
+        status: result.market.status,
+        priceQ96: result.market.clearingPriceQ96,
+        action: result.decision.action,
+        reason: result.decision.reason,
+      }),
     );
 
-    if (result.plan) {
-      log(`plan (${result.plan.length} transaction(s)):`);
-      for (const step of result.plan) {
-        log(`  - ${step.label}`);
-        log(`      to=${step.to} value=${step.value} data=${step.dataPreview}`);
-      }
+    if (result.plan && !result.hashes) {
+      for (const step of result.plan) info(pc.dim(`  would send: ${step.label} -> ${step.to}`));
     }
-
-    if (result.hashes) {
-      for (const hash of result.hashes) {
-        const explorer = client.chain.blockExplorers?.default?.url;
-        log(`  sent ${hash}${explorer ? ` (${explorer}/tx/${hash})` : ""}`);
-      }
+    for (const hash of result.hashes ?? []) {
+      info(`  ${pc.green("sent")} ${explorer ? `${explorer}/tx/${hash}` : hash}`);
     }
-
     if (result.decision.action === "bid") {
-      log(
-        `committed ${formatTokenAmount(state.spent, context.currency)} of ` +
-          `${formatTokenAmount(config.strategy.maxSpend, context.currency)}, ` +
+      info(
+        `  ${formatTokenAmount(state.spent, context.currency)} of ` +
+          `${formatTokenAmount(config.strategy.maxSpend, context.currency)} used, ` +
           `${state.bidsPlaced}/${config.strategy.maxBids} bids`,
       );
     }
@@ -139,44 +291,69 @@ async function main(): Promise<void> {
 
   if (config.once) {
     await cycle();
-    log("exiting (--once)");
+    p.outro("Done (--once).");
     return;
   }
 
-  let stopping = false;
   process.once("SIGINT", () => {
-    stopping = true;
-    log("stopping...");
+    console.log();
+    p.outro("Stopped.");
     process.exit(0);
   });
 
-  log(`polling every ${config.pollIntervalMs / 1000}s. Ctrl+C to stop.`);
+  p.log.step(`Polling every ${config.pollIntervalMs / 1000}s ${pc.dim("- Ctrl+C to stop")}`);
   for (;;) {
     let shouldContinue: boolean;
     try {
       shouldContinue = await cycle();
     } catch (error) {
       if (error instanceof GuardError) throw error; // safety failures must stop the agent
-      log(`cycle failed: ${(error as Error).message.split("\n")[0]}`);
+      info(pc.red(`cycle failed: ${(error as Error).message.split("\n")[0]}`));
       shouldContinue = true;
     }
 
     if (!shouldContinue) {
-      log("nothing further to do - stopping.");
+      p.log.info(`When the auction ends, run ${pc.cyan(`${CMD} settle`)} to collect refunds and tokens.`);
+      p.outro("Nothing further to do - stopped.");
       return;
     }
     await new Promise((r) => setTimeout(r, config.pollIntervalMs));
-    if (stopping) return;
   }
+}
+
+async function main(): Promise<void> {
+  const argv = process.argv.slice(2);
+  if (argv.includes("-v") || argv.includes("--version")) {
+    console.log(version);
+    return;
+  }
+  const args = parseArgs(argv);
+
+  if (args.command === "help") {
+    console.log(HELP);
+    return;
+  }
+  if (args.command === "init") {
+    await runInit({ envPath: args.envPath });
+    return;
+  }
+
+  loadEnvFile(args.envPath);
+  if (args.command === "status") await status(args);
+  else if (args.command === "settle") await runSettle(args);
+  else await agent(args);
 }
 
 main().catch((error) => {
   if (error instanceof ConfigError) {
-    console.error(`\n[beacon-agent] configuration error:\n  ${error.message}\n`);
+    console.error(`\n${pc.red("Configuration error")}\n  ${error.message}\n`);
   } else if (error instanceof GuardError) {
-    console.error(`\n[beacon-agent] SAFETY GUARD TRIPPED:\n  ${error.message}\n`);
+    console.error(`\n${pc.bgRed(pc.white(" SAFETY GUARD "))} ${error.message}\n`);
   } else {
-    console.error(`\n[beacon-agent] fatal: ${(error as Error).message}\n`);
+    console.error(`\n${pc.red("Error")} ${(error as Error).message.split("\n")[0]}\n`);
   }
-  process.exitCode = 1;
+  // Exit explicitly: an error thrown while a spinner is running leaves its
+  // timer alive, and the process would otherwise hang after printing - a
+  // frozen terminal in place of the safety message.
+  process.exit(1);
 });

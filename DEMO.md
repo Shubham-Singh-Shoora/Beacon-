@@ -35,7 +35,7 @@ Open <http://localhost:3000>.
 ## 2. The embeddable widget
 
 Already visible in the right-hand column of any auction detail page — that is
-the real `@beacon/cca-widget` component, not a mockup.
+the real `@hammerock/cca-widget` component, not a mockup.
 
 For the framework-free version:
 

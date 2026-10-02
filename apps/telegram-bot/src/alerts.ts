@@ -6,7 +6,7 @@
  * That makes the interesting behaviour - edge-triggering, not re-firing while a
  * condition stays true - directly testable.
  */
-import type { Address, AuctionStatus } from "@beacon/cca-sdk";
+import type { Address, AuctionStatus } from "@hammerock/cca-sdk";
 
 /** The minimum an alert rule needs to know about an auction at a point in time. */
 export interface AuctionSnapshot {

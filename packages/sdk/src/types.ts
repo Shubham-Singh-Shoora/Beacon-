@@ -116,6 +116,11 @@ export interface DiscoveredAuction {
   amount: bigint;
   /** ABI-encoded `AuctionParameters` the auction was configured with. */
   configData: Hex;
+  /**
+   * The factory that emitted the event, i.e. which CCA version this auction
+   * runs (see `factoryVersionOf`). Absent on records cached before v0.2.
+   */
+  factory?: Address;
   blockNumber: bigint;
   transactionHash: Hex;
   logIndex: number;

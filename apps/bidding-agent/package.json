@@ -1,23 +1,64 @@
 {
-  "name": "@beacon/bidding-agent",
-  "version": "0.1.0",
-  "private": true,
+  "name": "@hammerock/cca-agent",
+  "version": "0.3.0",
+  "description": "Command-line bidding agent for Uniswap Continuous Clearing Auctions (CCA): guided setup, live status, dry runs and capped live bidding. Mainnet bidding is opt-in.",
+  "keywords": [
+    "uniswap",
+    "cca",
+    "continuous-clearing-auction",
+    "auction",
+    "bidding",
+    "agent",
+    "cli",
+    "viem"
+  ],
+  "license": "MIT",
+  "author": "Shubham Singh Shoora",
+  "homepage": "https://github.com/Shubham-Singh-Shoora/Beacon-/tree/master/apps/bidding-agent#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Shubham-Singh-Shoora/Beacon-.git",
+    "directory": "apps/bidding-agent"
+  },
+  "bugs": {
+    "url": "https://github.com/Shubham-Singh-Shoora/Beacon-/issues"
+  },
   "type": "module",
+  "bin": {
+    "cca-agent": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20.11"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "start": "tsx src/index.ts",
-    "dry-run": "tsx src/index.ts --dry-run --once",
-    "simulate": "tsx src/index.ts --simulate",
+    "build": "tsup",
+    "prepublishOnly": "tsup",
+    "dev": "tsx watch src/index.ts run --env ../../.env",
+    "start": "tsx src/index.ts run --env ../../.env",
+    "cli": "tsx src/index.ts",
+    "dry-run": "tsx src/index.ts run --once --env ../../.env",
+    "simulate": "tsx src/index.ts simulate --env ../../.env",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
   "dependencies": {
-    "@beacon/cca-sdk": "workspace:*",
+    "@clack/prompts": "^1.8.1",
+    "@hammerock/cca-sdk": "workspace:^",
     "dotenv": "^17.2.3",
+    "picocolors": "^1.1.1",
     "viem": "^2.40.0"
   },
   "devDependencies": {
     "@types/node": "^22.18.0",
+    "tsup": "^8.5.1",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3",
     "vitest": "^3.2.4"

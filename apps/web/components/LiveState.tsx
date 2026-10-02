@@ -1,17 +1,8 @@
 "use client";
-
 import { useEffect, useState } from "react";
-import { formatQ96, formatQ96Compact, formatTokenAmount, mpsToFraction } from "@beacon/cca-sdk";
-import type { TokenMetadata } from "@beacon/cca-sdk";
+import { formatQ96, formatQ96Compact, formatTokenAmount, mpsToFraction } from "@hammerock/cca-sdk";
+import type { TokenMetadata } from "@hammerock/cca-sdk";
 import { ScheduleProgress } from "./Badges";
-
-/**
- * Polls our own API route for fresh auction state.
- *
- * Polls the server, not the RPC provider: BEACON_RPC_URL carries an API key and
- * must stay server-side. Formatting comes from the SDK, so the numbers here are
- * rendered by exactly the same code as the bot and the widget.
- */
 
 interface LiveStateResponse {
   clearingPriceQ96: string;
@@ -22,133 +13,130 @@ interface LiveStateResponse {
   headBlock: string;
   readAt: string;
 }
-
 export function LiveState({
   auction,
+  chainSlug,
+  networkName,
   token,
   currency,
   initial,
-  pollIntervalMs = 12_000,
+  pollIntervalMs = 12000,
   isEnded,
 }: {
   auction: string;
+  chainSlug: string;
+  networkName: string;
   token: TokenMetadata;
   currency: TokenMetadata;
   initial: LiveStateResponse;
   pollIntervalMs?: number;
   isEnded: boolean;
 }) {
-  const [data, setData] = useState<LiveStateResponse>(initial);
-  const [error, setError] = useState<string | null>(null);
-  const [updatedAt, setUpdatedAt] = useState<string>(initial.readAt);
-
+  const [data, setData] = useState(initial);
+  const [error, setError] = useState(false);
   useEffect(() => {
-    let cancelled = false;
-
+    if (isEnded) return;
+    const controller = new AbortController();
+    let inFlight = false;
     async function poll() {
+      if (inFlight || document.visibilityState === "hidden") return;
+      inFlight = true;
       try {
-        const response = await fetch(`/api/auctions/${auction}`, { cache: "no-store" });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const response = await fetch(`/api/auctions/${auction}?chain=${chainSlug}`, {
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error("Refresh unavailable");
         const next = (await response.json()) as LiveStateResponse;
-        if (cancelled) return;
-        setData(next);
-        setUpdatedAt(next.readAt);
-        setError(null);
-      } catch (cause) {
-        if (!cancelled) setError((cause as Error).message);
+        if (!controller.signal.aborted) {
+          setData(next);
+          setError(false);
+        }
+      } catch {
+        if (!controller.signal.aborted) setError(true);
+      } finally {
+        inFlight = false;
       }
     }
-
-    // An ended auction's state cannot change, so polling it forever is waste.
-    if (isEnded) return;
-
     const timer = setInterval(poll, pollIntervalMs);
     return () => {
-      cancelled = true;
+      controller.abort();
       clearInterval(timer);
     };
-  }, [auction, pollIntervalMs, isEnded]);
-
-  const hasCleared = BigInt(data.totalCleared) > 0n;
-
+  }, [auction, chainSlug, pollIntervalMs, isEnded]);
   return (
-    <div className="rounded-lg border border-neutral-800 bg-neutral-900/40 p-5">
-      <div className="flex items-baseline justify-between">
-        <h2 className="text-sm font-medium uppercase tracking-wide text-neutral-500">
-          Live state
-        </h2>
-        <span className="text-xs text-neutral-600">
-          {isEnded
-            ? "final — auction closed"
-            : `updated ${new Date(updatedAt).toLocaleTimeString()}`}
+    <section className="panel price-panel">
+      <div className="panel-heading">
+        <h2>{isEnded ? "Final auction outcome" : "Auction overview"}</h2>
+        <span>
+          <span className={isEnded ? "quiet-dot" : "network-dot"} />
+          {isEnded ? "Auction closed" : "Updates every 12 seconds"}
         </span>
       </div>
-
-      <dl className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
-        {/* The symbol pair lives in the value, not the label: the label is
-            CSS-uppercased, which would turn "tUSDC" into "TUSDC". */}
-        <Field label="Clearing price">
-          <span className="tabular-nums" title={formatQ96(BigInt(data.clearingPriceQ96))}>
-            {formatQ96Compact(BigInt(data.clearingPriceQ96))}
-          </span>{" "}
-          <span className="text-neutral-500">
-            {currency.symbol} per {token.symbol}
-          </span>
-        </Field>
-
-        <Field label="Graduated">
-          {data.isGraduated ? (
-            <span className="text-violet-300">Yes — raised enough to seed the pool</span>
-          ) : (
-            <span className="text-neutral-400">No</span>
-          )}
-        </Field>
-
-        <Field label="Raised">
-          <span className="tabular-nums">
+      <div className="price-label">
+        {isEnded ? "Final clearing price" : "Current clearing price"}
+      </div>
+      <div className="main-price" title={formatQ96(BigInt(data.clearingPriceQ96))}>
+        {formatQ96Compact(BigInt(data.clearingPriceQ96))}
+      </div>
+      <div className="price-unit">
+        {currency.symbol} per {token.symbol}
+      </div>
+      <div className="price-divider" />
+      <dl className="state-metrics">
+        <div>
+          <dt>Total raised</dt>
+          <dd>
             {formatTokenAmount(BigInt(data.currencyRaised), currency)}
-          </span>
-        </Field>
-
-        <Field label="Cleared">
-          {hasCleared ? (
-            <span className="tabular-nums">
-              {formatTokenAmount(BigInt(data.totalCleared), token)}
-            </span>
-          ) : (
-            <span className="text-neutral-500">Nothing cleared</span>
-          )}
-        </Field>
-
-        <Field label="Supply schedule released">
-          <div className="flex items-center gap-3">
-            <ScheduleProgress progress={mpsToFraction(data.cumulativeMps)} />
-          </div>
-          <p className="mt-1.5 text-xs text-neutral-600">
-            How much of the supply schedule has been released — not the amount sold. An auction
-            that closes with no bids still reaches 100%.
-          </p>
-        </Field>
-
-        <Field label="Chain head">
-          <span className="tabular-nums text-neutral-400">{data.headBlock}</span>
-        </Field>
+            <small>Committed bid currency</small>
+          </dd>
+        </div>
+        <div>
+          <dt>Tokens cleared</dt>
+          <dd>
+            {formatTokenAmount(BigInt(data.totalCleared), token)}
+            <small>
+              {BigInt(data.totalCleared) > 0n
+                ? "Supply distributed through the auction"
+                : "No supply has cleared"}
+            </small>
+          </dd>
+        </div>
+        <div>
+          <dt>Graduation</dt>
+          <dd className="graduation-value">
+            {data.isGraduated ? "Graduated ↗" : isEnded ? "Did not graduate" : "Not yet graduated"}
+            <small>
+              {data.isGraduated
+                ? "The graduation threshold was reached"
+                : "The graduation threshold was not reached"}
+            </small>
+          </dd>
+        </div>
+        <div>
+          <dt>Network block</dt>
+          <dd>
+            {BigInt(data.headBlock).toLocaleString("en-US")}
+            <small>{networkName}</small>
+          </dd>
+        </div>
       </dl>
-
-      {error ? (
-        <p className="mt-4 text-xs text-amber-400/80">
-          Could not refresh ({error}) — showing the last successful read.
+      <div className="schedule-block">
+        <div className="schedule-heading">
+          <span>Supply schedule released</span>
+          <span>{isEnded ? "Final schedule" : "Auction progress"}</span>
+        </div>
+        <ScheduleProgress progress={mpsToFraction(data.cumulativeMps)} />
+        <p>
+          This tracks the supply released by the schedule. Tokens cleared above shows how much
+          actually sold.
         </p>
-      ) : null}
-    </div>
-  );
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div>
-      <dt className="text-xs uppercase tracking-wide text-neutral-500">{label}</dt>
-      <dd className="mt-1 text-sm text-neutral-100">{children}</dd>
-    </div>
+      </div>
+      {error && (
+        <p className="notice" role="status">
+          Network updates are temporarily unavailable. Showing the last successful read.
+        </p>
+      )}
+    </section>
   );
 }

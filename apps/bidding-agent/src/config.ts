@@ -8,32 +8,64 @@
  * accident.
  */
 import { config as loadEnv } from "dotenv";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import { privateKeyToAccount } from "viem/accounts";
 import { isAddress } from "viem";
 import type { Address, PrivateKeyAccount } from "viem";
-import { decimalToQ96, normalizePrivateKey, PrivateKeyFormatError } from "@beacon/cca-sdk";
-
-const here = dirname(fileURLToPath(import.meta.url));
-const repoRoot = resolve(here, "../../..");
-loadEnv({ path: resolve(repoRoot, ".env"), quiet: true });
+import { decimalToQ96, normalizePrivateKey, PrivateKeyFormatError, rpcSettingsFromEnv } from "@hammerock/cca-sdk";
+import { CMD } from "./invocation";
 
 /**
- * Chains the agent may EVER broadcast on.
+ * Load the operator's `.env`.
  *
- * Deliberately narrower than the SDK's supported-chain list, and mainnet ids
- * are simply absent, so an unknown chain fails closed. Overridable only by an
- * explicit env var that still has to name a testnet.
+ * Only ever the file named by `--env`, or `.env` in the directory the command
+ * was run from. Installed as a package, the agent must never walk up into some
+ * unrelated project's `.env`. Variables already set in the shell win.
+ * Returns the path that was loaded, if any.
  */
-export const ALLOWED_CHAIN_IDS = new Set<number>([
+export function loadEnvFile(explicitPath?: string): string | undefined {
+  const path = resolve(explicitPath ?? ".env");
+  if (!existsSync(path)) {
+    if (explicitPath) throw new ConfigError(`--env file not found: ${path}`);
+    return undefined;
+  }
+  loadEnv({ path, quiet: true });
+  return path;
+}
+
+/**
+ * Testnets: the agent may read and broadcast freely.
+ *
+ * Both lists are written out here rather than taken from the SDK, so a chain
+ * the SDK adds later is unknown to the agent - and refused - until it is
+ * deliberately listed. An unknown chain fails closed by omission.
+ */
+export const TESTNET_CHAIN_IDS = new Set<number>([
   11155111, // Ethereum Sepolia
   84532, // Base Sepolia
   1301, // Unichain Sepolia
 ]);
 
+/**
+ * Mainnets: real money. Reading and dry runs are always fine; broadcasting
+ * additionally needs `--mainnet` or `AGENT_ALLOW_MAINNET=true`.
+ */
+export const MAINNET_CHAIN_IDS = new Set<number>([
+  1, // Ethereum
+  8453, // Base
+  130, // Unichain
+  42161, // Arbitrum One
+]);
+
+export function isMainnetChain(chainId: number): boolean {
+  return MAINNET_CHAIN_IDS.has(chainId);
+}
+
 export interface AgentConfig {
   rpcUrl: string;
+  /** Tried in order when rpcUrl errors (BEACON_FALLBACK_RPC_URL_<id>). */
+  fallbackRpcUrls: string[];
   chainId: number;
   lensAddress?: Address;
   auction: Address;
@@ -57,8 +89,10 @@ export interface AgentConfig {
   };
 
   pollIntervalMs: number;
-  /** True only when AGENT_BROADCAST=true AND --dry-run was not passed. */
+  /** True only when --live or AGENT_BROADCAST=true, AND neither --dry-run nor --plan was passed. */
   broadcast: boolean;
+  /** The operator opted in to real-money broadcasting: --mainnet or AGENT_ALLOW_MAINNET=true. */
+  allowMainnet: boolean;
   /** Run a scripted scenario through the real strategy instead of polling. */
   simulate: boolean;
   /** Build and print the bid transactions without the lifecycle gate. Never sends. */
@@ -70,7 +104,7 @@ export class ConfigError extends Error {}
 
 function required(name: string, value: string | undefined): string {
   if (!value || value.trim().length === 0) {
-    throw new ConfigError(`${name} is not set in .env`);
+    throw new ConfigError(`${name} is not set. Run "${CMD} init" to create a .env here.`);
   }
   return value.trim();
 }
@@ -78,7 +112,7 @@ function required(name: string, value: string | undefined): string {
 function parseBigint(name: string, raw: string | undefined, fallback?: bigint): bigint {
   if (!raw || raw.trim().length === 0) {
     if (fallback !== undefined) return fallback;
-    throw new ConfigError(`${name} is not set in .env`);
+    throw new ConfigError(`${name} is not set. Run "${CMD} init" to create a .env here.`);
   }
   let value: bigint;
   try {
@@ -105,14 +139,17 @@ function parseNumber(name: string, raw: string | undefined, fallback: number): n
  * Accepts it ONLY from the environment. Returns an account, so callers get an
  * address and a signer without ever seeing the key material.
  */
-function loadAccount(broadcast: boolean): PrivateKeyAccount | undefined {
+export function loadAccount(broadcast: boolean): PrivateKeyAccount | undefined {
   const raw = process.env.AGENT_PRIVATE_KEY?.trim();
 
   if (!raw || raw.length === 0 || /^0x0{64}$/i.test(raw)) {
     if (broadcast) {
       throw new ConfigError(
-        "AGENT_PRIVATE_KEY is not set, but AGENT_BROADCAST=true.\n" +
-          "Use a throwaway TESTNET key. Never a mainnet key. Never commit it.",
+        "Live mode needs AGENT_PRIVATE_KEY, and it is not set.\n" +
+          "  Add it to your .env, or set it in this shell only:\n" +
+          "    macOS/Linux:  export AGENT_PRIVATE_KEY=0x...\n" +
+          "    PowerShell:   $env:AGENT_PRIVATE_KEY=\"0x...\"\n" +
+          "  Use a dedicated wallet holding only your budget plus gas. Never commit it.",
       );
     }
     return undefined;
@@ -128,10 +165,21 @@ function loadAccount(broadcast: boolean): PrivateKeyAccount | undefined {
   }
 }
 
+function pickRpc(chainId: number): { rpcUrl: string; fallbackRpcUrls: string[] } {
+  const { rpcUrl, fallbackRpcUrls } = rpcSettingsFromEnv(chainId);
+  return { rpcUrl, fallbackRpcUrls };
+}
+
 export function loadConfig(argv: readonly string[] = process.argv.slice(2)): AgentConfig {
   const flags = new Set(argv.filter((arg) => arg.startsWith("--")));
 
   const chainId = Number(process.env.BEACON_CHAIN_ID ?? 11155111);
+  if (!TESTNET_CHAIN_IDS.has(chainId) && !MAINNET_CHAIN_IDS.has(chainId)) {
+    throw new ConfigError(
+      `BEACON_CHAIN_ID ${chainId} is not supported. ` +
+        `Testnets: ${[...TESTNET_CHAIN_IDS].join(", ")}. Mainnets: ${[...MAINNET_CHAIN_IDS].join(", ")}.`,
+    );
+  }
   const auction = required("AGENT_AUCTION_ADDRESS", process.env.AGENT_AUCTION_ADDRESS);
   if (!isAddress(auction)) {
     throw new ConfigError(`AGENT_AUCTION_ADDRESS: "${auction}" is not a valid address.`);
@@ -148,12 +196,27 @@ export function loadConfig(argv: readonly string[] = process.argv.slice(2)): Age
   }
   if (maxPriceQ96 <= 0n) throw new ConfigError("AGENT_MAX_PRICE must be greater than zero.");
 
-  // --dry-run always wins over AGENT_BROADCAST.
+  // --dry-run always wins over --live and AGENT_BROADCAST.
   const wantsBroadcast =
-    (process.env.AGENT_BROADCAST ?? "false").trim().toLowerCase() === "true" &&
+    (flags.has("--live") ||
+      (process.env.AGENT_BROADCAST ?? "false").trim().toLowerCase() === "true") &&
     !flags.has("--dry-run") &&
     // --plan bypasses the lifecycle gate, so it is never allowed to send.
     !flags.has("--plan");
+
+  const allowMainnet =
+    flags.has("--mainnet") ||
+    (process.env.AGENT_ALLOW_MAINNET ?? "false").trim().toLowerCase() === "true";
+
+  // Checked here so the operator hears it before anything connects, and again
+  // in guards.ts against the chain the RPC actually reports.
+  if (wantsBroadcast && isMainnetChain(chainId) && !allowMainnet) {
+    throw new ConfigError(
+      `Chain ${chainId} is a MAINNET - live bids spend real money.\n` +
+        "  Opt in explicitly: add --mainnet, or set AGENT_ALLOW_MAINNET=true.\n" +
+        "  Dry runs, status, plan and simulate need no opt-in.",
+    );
+  }
 
   const lens = process.env.BEACON_LENS_ADDRESS?.trim();
 
@@ -173,7 +236,8 @@ export function loadConfig(argv: readonly string[] = process.argv.slice(2)): Age
   }
 
   return {
-    rpcUrl: process.env.BEACON_RPC_URL ?? "https://ethereum-sepolia-rpc.publicnode.com",
+    // BEACON_RPC_URL(_<id>), else the chain's free default; plus any fallbacks.
+    ...pickRpc(chainId),
     chainId,
     lensAddress: lens && lens.length > 0 && isAddress(lens) ? (lens as Address) : undefined,
     auction: auction as Address,
@@ -191,6 +255,7 @@ export function loadConfig(argv: readonly string[] = process.argv.slice(2)): Age
       parseNumber("BEACON_POLL_INTERVAL_SECONDS", process.env.BEACON_POLL_INTERVAL_SECONDS, 15) *
       1000,
     broadcast: wantsBroadcast,
+    allowMainnet,
     simulate: flags.has("--simulate"),
     plan: flags.has("--plan"),
     once: flags.has("--once"),

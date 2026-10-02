@@ -1,4 +1,4 @@
-import { decimalToQ96 } from "@beacon/cca-sdk";
+import { decimalToQ96 } from "@hammerock/cca-sdk";
 import { describe, expect, it } from "vitest";
 import { evaluateAlerts, hasNoActiveRules } from "../src/alerts";
 import type { AlertThresholds, AuctionSnapshot } from "../src/alerts";

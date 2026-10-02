@@ -7,14 +7,11 @@
 import { NextResponse } from "next/server";
 import { isAddress } from "viem";
 import type { Address } from "viem";
-import { getLiveState } from "@/lib/beacon";
+import { findAuctionNetwork, getLiveState, resolveNetwork } from "@/lib/beacon";
 
 export const dynamic = "force-dynamic";
 
-export async function GET(
-  _request: Request,
-  context: { params: Promise<{ address: string }> },
-) {
+export async function GET(request: Request, context: { params: Promise<{ address: string }> }) {
   const { address } = await context.params;
 
   if (!isAddress(address)) {
@@ -22,7 +19,10 @@ export async function GET(
   }
 
   try {
-    const { state, headBlock } = await getLiveState(address as Address);
+    // ?chain=<slug>; without it, the chain whose store holds this auction.
+    const chain = new URL(request.url).searchParams.get("chain") ?? undefined;
+    const network = chain ? resolveNetwork(chain) : ((await findAuctionNetwork(address as Address)) ?? resolveNetwork(undefined));
+    const { state, headBlock } = await getLiveState(network, address as Address);
     return NextResponse.json({
       // bigints are not JSON-serializable, so everything crosses as a string.
       clearingPriceQ96: state.checkpoint.clearingPriceQ96.toString(),
@@ -31,11 +31,12 @@ export async function GET(
       totalCleared: state.totalCleared.toString(),
       isGraduated: state.isGraduated,
       headBlock: headBlock.toString(),
+      chainId: network.chainId,
       readAt: new Date().toISOString(),
     });
-  } catch (error) {
+  } catch {
     return NextResponse.json(
-      { error: (error as Error).message.split("\n")[0] },
+      { error: "Auction data is temporarily unavailable. Please try again." },
       { status: 502 },
     );
   }

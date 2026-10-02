@@ -1,15 +1,19 @@
 import { defineConfig } from "tsup";
 
 export default defineConfig([
-  // React consumers: ESM + CJS, SDK bundled in so it installs standalone.
+  // React consumers: ESM + CJS.
   {
     entry: { index: "src/index.ts" },
     format: ["esm", "cjs"],
     dts: true,
     sourcemap: true,
     clean: true,
-    external: ["react", "react-dom", "viem", "wagmi"],
-    noExternal: ["@beacon/cca-sdk"],
+    // The SDK is a declared dependency, so load it from node_modules rather
+    // than bundling a second copy. Its types are imported by our .d.ts anyway.
+    external: ["react", "react-dom", "viem", "wagmi", "@hammerock/cca-sdk"],
+    // The component uses hooks. Without this directive a Next.js App Router
+    // user importing it into a server component gets a hooks error.
+    banner: { js: '"use client";' },
   },
   // Non-React sites: single <script> tag that mounts into a div.
   {

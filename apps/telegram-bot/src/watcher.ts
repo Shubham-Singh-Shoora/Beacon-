@@ -2,7 +2,7 @@
  * The polling loop: read auction state through the SDK, diff it against the
  * previous observation, and hand any resulting alerts to a sink.
  *
- * All contract interaction goes through @beacon/cca-sdk. Nothing here builds a
+ * All contract interaction goes through @hammerock/cca-sdk. Nothing here builds a
  * call or decodes an event itself.
  */
 import {
@@ -11,9 +11,9 @@ import {
   getAuctionSummaries,
   getTokenMetadata,
   isFailedSummary,
-} from "@beacon/cca-sdk";
-import type { Address, AuctionInfo, BeaconClient, TokenMetadata } from "@beacon/cca-sdk";
-import { JsonAuctionStore } from "@beacon/cca-sdk/node";
+} from "@hammerock/cca-sdk";
+import type { Address, AuctionInfo, BeaconClient, TokenMetadata } from "@hammerock/cca-sdk";
+import { JsonAuctionStore } from "@hammerock/cca-sdk/node";
 import { evaluateAlerts } from "./alerts";
 import type { Alert, AlertThresholds, AuctionSnapshot } from "./alerts";
 import type { AuctionView } from "./format";

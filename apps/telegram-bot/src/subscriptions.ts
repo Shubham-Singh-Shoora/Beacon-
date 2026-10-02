@@ -10,7 +10,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { getAddress } from "viem";
-import type { Address } from "@beacon/cca-sdk";
+import type { Address } from "@hammerock/cca-sdk";
 
 export interface ChatSubscription {
   chatId: string;
@@ -20,6 +20,12 @@ export interface ChatSubscription {
 interface SerializedFile {
   version: 1;
   chats: Record<string, { auctions: string[] }>;
+  /**
+   * Which chain each watched auction is on (lowercase address -> chain id).
+   * Optional: files written before multi-chain have none, and those auctions
+   * are matched to a chain from the stores at startup.
+   */
+  chains?: Record<string, number>;
 }
 
 function normalise(address: Address): string {
@@ -43,6 +49,8 @@ export class SubscriptionStore {
   private chats = new Map<string, Set<string>>();
   /** Preserves the checksummed form for display. */
   private display = new Map<string, Address>();
+  /** Chain id per auction, when known. */
+  private chainIds = new Map<string, number>();
   private loaded = false;
 
   constructor(private readonly filePath: string) {}
@@ -63,6 +71,9 @@ export class SubscriptionStore {
         }
         this.chats.set(chatId, set);
       }
+      for (const [key, chainId] of Object.entries(parsed.chains ?? {})) {
+        this.chainIds.set(key.toLowerCase(), chainId);
+      }
     } catch {
       // No file yet - a fresh install starts with no subscriptions.
     }
@@ -78,16 +89,24 @@ export class SubscriptionStore {
     await mkdir(dirname(this.filePath), { recursive: true });
     await writeFile(
       this.filePath,
-      JSON.stringify({ version: 1, chats } satisfies SerializedFile, null, 2) + "\n",
+      JSON.stringify(
+        { version: 1, chats, chains: Object.fromEntries(this.chainIds) } satisfies SerializedFile,
+        null,
+        2,
+      ) + "\n",
       "utf8",
     );
   }
 
   /** @returns false when the chat was already watching it. */
-  async watch(chatId: string, auction: Address): Promise<boolean> {
+  async watch(chatId: string, auction: Address, chainId?: number): Promise<boolean> {
     await this.load();
     const key = normalise(auction);
     this.display.set(key, toDisplay(auction));
+    if (chainId !== undefined && this.chainIds.get(key) !== chainId) {
+      this.chainIds.set(key, chainId);
+      await this.persist();
+    }
 
     const set = this.chats.get(chatId) ?? new Set<string>();
     if (set.has(key)) return false;
@@ -138,6 +157,21 @@ export class SubscriptionStore {
       chatId,
       auctions: [...set].map((key) => this.display.get(key) ?? (key as Address)),
     }));
+  }
+
+  /** The chain an auction was registered on, if recorded. */
+  async chainOf(auction: Address): Promise<number | undefined> {
+    await this.load();
+    return this.chainIds.get(normalise(auction));
+  }
+
+  /** Record a chain learned after the fact (e.g. matched from a store). */
+  async setChain(auction: Address, chainId: number): Promise<void> {
+    await this.load();
+    const key = normalise(auction);
+    if (this.chainIds.get(key) === chainId) return;
+    this.chainIds.set(key, chainId);
+    await this.persist();
   }
 
   async isEmpty(): Promise<boolean> {

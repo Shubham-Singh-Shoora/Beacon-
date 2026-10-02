@@ -1,14 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { ALLOWED_CHAIN_IDS } from "../src/config";
+import { MAINNET_CHAIN_IDS, TESTNET_CHAIN_IDS } from "../src/config";
 import {
   GuardError,
   assertSufficientBalance,
-  assertTestnetOnly,
+  assertChainAllowed,
   assertWithinPriceCap,
   assertWithinSpendCap,
 } from "../src/guards";
 import type { AgentConfig } from "../src/config";
-import type { BeaconClient } from "@beacon/cca-sdk";
+import type { BeaconClient } from "@hammerock/cca-sdk";
 
 function fakeClient(reportedChainId: number): BeaconClient {
   return {
@@ -16,43 +16,57 @@ function fakeClient(reportedChainId: number): BeaconClient {
   } as unknown as BeaconClient;
 }
 
-function fakeConfig(chainId: number): AgentConfig {
-  return { chainId } as unknown as AgentConfig;
+function fakeConfig(chainId: number, broadcast = false, allowMainnet = false): AgentConfig {
+  return { chainId, broadcast, allowMainnet } as unknown as AgentConfig;
 }
 
-describe("testnet allowlist", () => {
-  it("contains no mainnet chain ids", () => {
-    // Fails closed by omission rather than by an invertible condition.
-    for (const mainnet of [1, 8453, 130, 42161, 10, 137]) {
-      expect(ALLOWED_CHAIN_IDS.has(mainnet)).toBe(false);
+describe("chain allowlists", () => {
+  it("lists testnets and mainnets separately, with no overlap", () => {
+    for (const id of [11155111, 84532, 1301]) expect(TESTNET_CHAIN_IDS.has(id)).toBe(true);
+    for (const id of [1, 8453, 130, 42161]) expect(MAINNET_CHAIN_IDS.has(id)).toBe(true);
+    for (const id of MAINNET_CHAIN_IDS) expect(TESTNET_CHAIN_IDS.has(id)).toBe(false);
+  });
+
+  it("knows no other chain - an unlisted one fails closed by omission", () => {
+    for (const id of [10, 137, 31337]) {
+      expect(TESTNET_CHAIN_IDS.has(id) || MAINNET_CHAIN_IDS.has(id)).toBe(false);
     }
-    expect(ALLOWED_CHAIN_IDS.has(11155111)).toBe(true);
   });
 });
 
-describe("assertTestnetOnly", () => {
-  it("passes on an allowed testnet the RPC agrees with", async () => {
-    await expect(
-      assertTestnetOnly(fakeClient(11155111), fakeConfig(11155111)),
-    ).resolves.toBeUndefined();
+describe("assertChainAllowed", () => {
+  const ok = (chainId: number, broadcast: boolean, allowMainnet = false) =>
+    assertChainAllowed(fakeClient(chainId), fakeConfig(chainId, broadcast, allowMainnet));
+
+  it("passes on a testnet the RPC agrees with, live or not", async () => {
+    await expect(ok(11155111, true)).resolves.toBeUndefined();
+    await expect(ok(11155111, false)).resolves.toBeUndefined();
   });
 
-  it("refuses Ethereum mainnet outright", async () => {
-    await expect(assertTestnetOnly(fakeClient(1), fakeConfig(1))).rejects.toThrow(GuardError);
-    await expect(assertTestnetOnly(fakeClient(1), fakeConfig(1))).rejects.toThrow(/TESTNET ONLY/);
+  it("lets a mainnet be READ without any opt-in", async () => {
+    await expect(ok(1, false)).resolves.toBeUndefined();
+    await expect(ok(8453, false)).resolves.toBeUndefined();
+  });
+
+  it("locks mainnet broadcasting without the opt-in", async () => {
+    await expect(ok(1, true)).rejects.toThrow(GuardError);
+    await expect(ok(1, true)).rejects.toThrow(/MAINNET LOCKED/);
+    await expect(ok(42161, true)).rejects.toThrow(/MAINNET LOCKED/);
+  });
+
+  it("allows mainnet broadcasting once the operator opts in", async () => {
+    await expect(ok(1, true, true)).resolves.toBeUndefined();
   });
 
   it("catches a mainnet RPC hiding behind a testnet chain id in .env", async () => {
-    // The dangerous case: config says Sepolia, the endpoint is actually mainnet.
+    // The dangerous case: config says Sepolia (no lock), the endpoint is mainnet.
     await expect(
-      assertTestnetOnly(fakeClient(1), fakeConfig(11155111)),
+      assertChainAllowed(fakeClient(1), fakeConfig(11155111, true)),
     ).rejects.toThrow(/chain id mismatch/i);
   });
 
   it("refuses an unknown chain even if the RPC agrees", async () => {
-    await expect(assertTestnetOnly(fakeClient(31337), fakeConfig(31337))).rejects.toThrow(
-      /TESTNET ONLY/,
-    );
+    await expect(ok(31337, false)).rejects.toThrow(/unknown chain/);
   });
 });
 

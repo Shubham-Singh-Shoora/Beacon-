@@ -1,10 +1,30 @@
 {
-  "name": "@beacon/cca-widget",
-  "version": "0.1.0",
-  "private": true,
-  "description": "Embeddable live CCA auction card + bid form",
+  "name": "@hammerock/cca-widget",
+  "version": "0.2.0",
+  "description": "Embeddable React component (and <script> tag) showing a live Uniswap CCA auction with a bid form. Ethereum, Base, Unichain, Arbitrum and their testnets.",
+  "keywords": [
+    "uniswap",
+    "cca",
+    "continuous-clearing-auction",
+    "auction",
+    "widget",
+    "react",
+    "embed",
+    "viem"
+  ],
   "license": "MIT",
+  "author": "Shubham Singh Shoora",
+  "homepage": "https://github.com/Shubham-Singh-Shoora/Beacon-/tree/master/packages/widget#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Shubham-Singh-Shoora/Beacon-.git",
+    "directory": "packages/widget"
+  },
+  "bugs": {
+    "url": "https://github.com/Shubham-Singh-Shoora/Beacon-/issues"
+  },
   "type": "module",
+  "sideEffects": false,
   "main": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
@@ -13,25 +33,39 @@
     "./package.json": "./package.json"
   },
   "publishConfig": {
+    "access": "public",
     "main": "./dist/index.cjs",
     "module": "./dist/index.js",
     "types": "./dist/index.d.ts",
     "exports": {
       ".": {
-        "types": "./dist/index.d.ts",
-        "import": "./dist/index.js",
-        "require": "./dist/index.cjs"
+        "import": {
+          "types": "./dist/index.d.ts",
+          "default": "./dist/index.js"
+        },
+        "require": {
+          "types": "./dist/index.d.cts",
+          "default": "./dist/index.cjs"
+        }
       },
       "./mount": "./dist/mount.global.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "build": "tsup",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "tsup"
   },
   "dependencies": {
-    "@beacon/cca-sdk": "workspace:*"
+    "@hammerock/cca-sdk": "workspace:^"
   },
   "peerDependencies": {
     "react": ">=18",

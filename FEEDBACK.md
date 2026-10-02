@@ -129,7 +129,7 @@ Every claim above is exercised by code in this repo:
 | Finding | Where it is demonstrated |
 | --- | --- |
 | #3 non-view `state()` | `packages/sdk/src/read.ts`, `packages/sdk/test/read.test.ts` |
-| #6 lens via state override | `pnpm --filter @beacon/cca-sdk check:live` works with no lens deployed |
+| #6 lens via state override | `pnpm --filter @hammerock/cca-sdk check:live` works with no lens deployed |
 | #7 Permit2 for ERC-20 bids | `packages/sdk/test/write.test.ts` |
 | #10 tick-boundary bid prices | `packages/sdk/test/write.test.ts` - the exact price that reverted |
 | #11 `onTokensReceived()` | `packages/sdk/scripts/deploy-demo-auction.ts` step 4/4 |

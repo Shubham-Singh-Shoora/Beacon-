@@ -10,8 +10,8 @@ import {
   formatQ96Compact,
   formatTokenAmount,
   mpsToFraction,
-} from "@beacon/cca-sdk";
-import type { Address } from "@beacon/cca-sdk";
+} from "@hammerock/cca-sdk";
+import type { Address } from "@hammerock/cca-sdk";
 import { useAuction } from "./useAuction";
 import { connectWallet, hasInjectedWallet } from "./wallet";
 import type { ConnectedWallet } from "./wallet";
@@ -23,7 +23,7 @@ export interface AuctionCardProps {
   /** Public RPC the widget reads through. Never put a keyed URL here - the
    *  widget runs in the visitor's browser. */
   rpcUrl: string;
-  /** Chain id the auction lives on. Must be a supported testnet. */
+  /** Chain id the auction lives on: a supported mainnet or testnet. */
   chainId: number;
   /** Optional deployed AuctionStateLens. Omit to use the eth_call override. */
   lensAddress?: Address;

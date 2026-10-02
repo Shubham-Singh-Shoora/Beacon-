@@ -2,44 +2,41 @@
  * Pre-flight safety checks.
  *
  * These run before the agent is allowed to broadcast anything, and each one
- * fails closed. The agent is testnet-only by construction: mainnet chain ids
- * are absent from the allowlist rather than blocked by a condition someone
- * could invert.
+ * fails closed. Chains are explicit allowlists (see config.ts): an unknown id
+ * is refused by omission, and a mainnet only broadcasts after an opt-in.
  */
-import { ALLOWED_CHAIN_IDS } from "./config";
+import { MAINNET_CHAIN_IDS, TESTNET_CHAIN_IDS } from "./config";
 import type { AgentConfig } from "./config";
-import type { BeaconClient } from "@beacon/cca-sdk";
+import type { BeaconClient } from "@hammerock/cca-sdk";
 
 export class GuardError extends Error {}
 
 /**
- * Refuse any chain that is not an explicitly allowed testnet.
+ * Refuse an unknown chain, and refuse to broadcast on a mainnet without the
+ * operator's explicit opt-in.
  *
- * Checked twice on purpose: once against the configured id, and once against
- * the id the RPC actually reports, because a copy-pasted mainnet RPC URL with a
- * testnet chain id in .env would otherwise sail straight through.
+ * Checked against the id the RPC actually reports, not just the configured
+ * one: a copy-pasted mainnet RPC URL behind a testnet BEACON_CHAIN_ID would
+ * otherwise sail straight past the mainnet lock.
  */
-export async function assertTestnetOnly(
-  client: BeaconClient,
-  config: AgentConfig,
-): Promise<void> {
-  if (!ALLOWED_CHAIN_IDS.has(config.chainId)) {
-    throw new GuardError(
-      `TESTNET ONLY: refusing to run against chain id ${config.chainId}. ` +
-        `Allowed: ${[...ALLOWED_CHAIN_IDS].join(", ")}.`,
-    );
+export async function assertChainAllowed(client: BeaconClient, config: AgentConfig): Promise<void> {
+  const known = (id: number) => TESTNET_CHAIN_IDS.has(id) || MAINNET_CHAIN_IDS.has(id);
+  if (!known(config.chainId)) {
+    throw new GuardError(`Refusing to run against unknown chain id ${config.chainId}.`);
   }
 
   const reported = await client.publicClient.getChainId();
   if (reported !== config.chainId) {
     throw new GuardError(
       `RPC chain id mismatch: configured ${config.chainId}, endpoint reports ${reported}. ` +
-        `Refusing to broadcast against an unexpected network.`,
+        `Refusing to run against an unexpected network.`,
     );
   }
-  if (!ALLOWED_CHAIN_IDS.has(reported)) {
+
+  if (MAINNET_CHAIN_IDS.has(reported) && config.broadcast && !config.allowMainnet) {
     throw new GuardError(
-      `TESTNET ONLY: the RPC endpoint reports chain id ${reported}, which is not allowed.`,
+      `MAINNET LOCKED: chain ${reported} spends real money. ` +
+        `Pass --mainnet or set AGENT_ALLOW_MAINNET=true to broadcast.`,
     );
   }
 }

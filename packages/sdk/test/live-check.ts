@@ -2,7 +2,7 @@
  * Phase 1 definition-of-done: point the SDK at a real testnet and prove the
  * read side works end to end.
  *
- *   pnpm --filter @beacon/cca-sdk check:live
+ *   pnpm --filter @hammerock/cca-sdk check:live
  *
  * Discovers every auction the factory has ever created by scanning
  * `AuctionCreated`, then reads one auction's live state through
@@ -28,6 +28,7 @@ import {
   isFailedSummary,
   getAuctionSummaries,
   NATIVE_CURRENCY,
+  requireFactoryDeployBlock,
   scanAuctions,
   UPSTREAM_COMMIT,
   UPSTREAM_TAG,
@@ -61,10 +62,11 @@ async function main(): Promise<void> {
   await assertChainMatches(client);
 
   const headBlock = await client.publicClient.getBlockNumber();
+  const fromBlock = requireFactoryDeployBlock(client);
   console.log(`Chain               : ${client.chain.name} (${client.chainId})`);
   console.log(`Factory             : ${client.factoryAddress}`);
   console.log(`Lens                : ${client.lensAddress ?? "none deployed - using eth_call state override"}`);
-  console.log(`Scanning blocks     : ${client.factoryDeployBlock} -> ${headBlock}`);
+  console.log(`Scanning blocks     : ${fromBlock} -> ${headBlock}`);
 
   heading("1. Discovering auctions via the factory's AuctionCreated event");
 
@@ -73,8 +75,8 @@ async function main(): Promise<void> {
   const auctions = await scanAuctions(client, {
     toBlock: headBlock,
     onProgress: ({ scannedTo, headBlock: head, found }) => {
-      const span = Number(head - client.factoryDeployBlock);
-      const done = Number(scannedTo - client.factoryDeployBlock);
+      const span = Number(head - fromBlock);
+      const done = Number(scannedTo - fromBlock);
       const percent = Math.floor((done / span) * 100);
       if (percent >= lastLoggedPercent + 10) {
         lastLoggedPercent = percent;

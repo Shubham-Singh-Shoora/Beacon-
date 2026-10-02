@@ -2,7 +2,7 @@
  * The agent runtime: read state, ask the strategy, build the transactions,
  * and either broadcast them or describe them.
  *
- * All transaction construction comes from @beacon/cca-sdk's `write.ts` -
+ * All transaction construction comes from @hammerock/cca-sdk's `write.ts` -
  * `checkBidReadiness`, `getPrevTickHint` and `buildBidTransactions`. The agent
  * contains no encoding of its own, so the ERC-20 Permit2 flow and the native
  * `msg.value` rule are handled in exactly one place, shared with the widget.
@@ -19,8 +19,8 @@ import {
   getTokenMetadata,
   deriveStatus,
   NATIVE_CURRENCY,
-} from "@beacon/cca-sdk";
-import type { AuctionInfo, BeaconClient, TokenMetadata } from "@beacon/cca-sdk";
+} from "@hammerock/cca-sdk";
+import type { AuctionInfo, BeaconClient, TokenMetadata } from "@hammerock/cca-sdk";
 import { createWalletClient, http } from "viem";
 import type { Hex } from "viem";
 import type { AgentConfig } from "./config";

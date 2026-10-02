@@ -23,7 +23,7 @@ export interface EnrichResult {
 export async function enrichStore(
   client: BeaconClient,
   store: AuctionStore,
-  options: { concurrency?: number; onProgress?: (message: string) => void } = {},
+  options: { concurrency?: number; retries?: number; onProgress?: (message: string) => void } = {},
 ): Promise<EnrichResult> {
   const snapshot = await store.read();
   if (!snapshot) {
@@ -55,6 +55,7 @@ export async function enrichStore(
   };
 
   const concurrency = options.concurrency ?? 5;
+  const retries = options.retries ?? 4;
   const updated: AuctionRecord[] = [];
   let failed = 0;
 
@@ -62,16 +63,22 @@ export async function enrichStore(
     const batch = needsWork.slice(i, i + concurrency);
     const settled = await Promise.all(
       batch.map(async (record): Promise<AuctionRecord | null> => {
-        try {
-          const info = record.info ?? (await getAuctionInfo(client, record.auction));
-          const [tokenMeta, currencyMeta] = await Promise.all([
-            record.tokenMeta ?? metadata(info.token),
-            record.currencyMeta ?? metadata(info.currency),
-          ]);
-          return { ...record, info, tokenMeta, currencyMeta };
-        } catch {
-          return null;
+        // Free public RPCs rate-limit bursts (Base's official endpoint failed
+        // ~90% of a 5-wide burst, yet every read succeeds on its own), so back
+        // off and retry before counting a record as failed.
+        for (let attempt = 0; attempt <= retries; attempt++) {
+          try {
+            const info = record.info ?? (await getAuctionInfo(client, record.auction));
+            const [tokenMeta, currencyMeta] = await Promise.all([
+              record.tokenMeta ?? metadata(info.token),
+              record.currencyMeta ?? metadata(info.currency),
+            ]);
+            return { ...record, info, tokenMeta, currencyMeta };
+          } catch {
+            if (attempt < retries) await new Promise((r) => setTimeout(r, 1_000 * 2 ** attempt));
+          }
         }
+        return null;
       }),
     );
 
@@ -89,6 +96,7 @@ export async function enrichStore(
     await store.merge({
       chainId: snapshot.chainId,
       factoryAddress: snapshot.factoryAddress,
+      factoryAddresses: snapshot.factoryAddresses,
       lastSyncedBlock: snapshot.lastSyncedBlock,
       auctions: updated,
     });

@@ -13,7 +13,7 @@
  *   cap itself, so an early trigger cannot cause an overpay.
  * - The spend check uses `>` on exact bigints, so the cap is a hard ceiling.
  */
-import type { AuctionStatus } from "@beacon/cca-sdk";
+import type { AuctionStatus } from "@hammerock/cca-sdk";
 
 export interface StrategyConfig {
   /** Hard price ceiling, Q96. The agent never submits a bid above this. */

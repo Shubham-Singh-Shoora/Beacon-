@@ -68,6 +68,7 @@ function makeFakeClient(options: {
     chain: { name: "Fake Testnet" },
     chainId: 11155111,
     factoryAddress: "0xCCccCcCAE7503Cac057829BF2811De42E16e0bD5",
+    factoryAddresses: ["0xCCccCcCAE7503Cac057829BF2811De42E16e0bD5"],
     factoryDeployBlock: 0n,
     blockTimeSeconds: 12,
   } as unknown as BeaconClient;

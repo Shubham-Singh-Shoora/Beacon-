@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { SubscriptionStore } from "../src/subscriptions";
-import type { Address } from "@beacon/cca-sdk";
+import type { Address } from "@hammerock/cca-sdk";
 
 const AUCTION_A = "0x145A9163d5a89fe843955b1D337F75d46088E156" as Address;
 const AUCTION_B = "0xa26DBABBbF9451F150A87d7635f6891474c4F0FA" as Address;
@@ -102,5 +102,28 @@ describe("SubscriptionStore", () => {
 
     expect(await store.isEmpty()).toBe(true);
     expect(await store.allChats()).toEqual([]);
+  });
+});
+
+describe("SubscriptionStore - chains", () => {
+  it("records and persists which chain an auction is on", async () => {
+    const store = new SubscriptionStore(file);
+    await store.watch("chat-1", AUCTION_A, 8453);
+    expect(await store.chainOf(AUCTION_A)).toBe(8453);
+
+    const reloaded = new SubscriptionStore(file);
+    expect(await reloaded.chainOf(AUCTION_A.toLowerCase() as Address)).toBe(8453);
+  });
+
+  it("loads a pre-multi-chain file, then learns the chain later", async () => {
+    const { writeFile } = await import("node:fs/promises");
+    await writeFile(file, JSON.stringify({ version: 1, chats: { "chat-1": { auctions: [AUCTION_B] } } }));
+
+    const store = new SubscriptionStore(file);
+    expect(await store.allAuctions()).toEqual([AUCTION_B]);
+    expect(await store.chainOf(AUCTION_B)).toBeUndefined();
+
+    await store.setChain(AUCTION_B, 1);
+    expect(JSON.parse(await readFile(file, "utf8")).chains).toEqual({ [AUCTION_B.toLowerCase()]: 1 });
   });
 });

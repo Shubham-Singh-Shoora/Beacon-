@@ -10,8 +10,8 @@
  * Only the price sequence is synthetic. The strategy, the guardrails and the
  * Q96 comparisons are the production code path.
  */
-import { formatQ96, formatTokenAmount } from "@beacon/cca-sdk";
-import type { TokenMetadata } from "@beacon/cca-sdk";
+import { formatQ96, formatTokenAmount } from "@hammerock/cca-sdk";
+import type { TokenMetadata } from "@hammerock/cca-sdk";
 import { applyBid, decide, triggerThresholdQ96 } from "./strategy";
 import type { StrategyConfig, StrategyState } from "./strategy";
 

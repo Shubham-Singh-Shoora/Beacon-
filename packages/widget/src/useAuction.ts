@@ -5,7 +5,7 @@ import {
   getAuctionInfo,
   getAuctionState,
   getTokenMetadata,
-} from "@beacon/cca-sdk";
+} from "@hammerock/cca-sdk";
 import type {
   Address,
   AuctionInfo,
@@ -13,10 +13,10 @@ import type {
   AuctionStatus,
   BeaconClient,
   TokenMetadata,
-} from "@beacon/cca-sdk";
+} from "@hammerock/cca-sdk";
 
 /**
- * Everything the card renders, read through @beacon/cca-sdk.
+ * Everything the card renders, read through @hammerock/cca-sdk.
  *
  * The widget runs on somebody else's website, so it reads through whatever
  * public RPC the embedder passes in. It never needs a lens deployment: the SDK
@@ -81,7 +81,7 @@ export function useAuction(options: {
   useEffect(() => {
     const client = clientRef.current;
     if (!client) {
-      setError(new Error(`Unsupported or non-testnet chain id ${chainId}.`));
+      setError(new Error(`Unsupported chain id ${chainId}.`));
       setLoading(false);
       return;
     }

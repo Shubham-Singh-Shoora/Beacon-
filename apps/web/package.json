@@ -4,13 +4,13 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "pnpm --filter @hammerock/cca-widget build && node -e \"require('fs').copyFileSync('../../packages/widget/dist/mount.global.js','public/beacon-widget.js')\" && next build",
     "start": "next start",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@beacon/cca-sdk": "workspace:*",
-    "@beacon/cca-widget": "workspace:*",
+    "@hammerock/cca-sdk": "workspace:*",
+    "@hammerock/cca-widget": "workspace:*",
     "next": "^15.5.4",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",

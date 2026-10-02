@@ -14,8 +14,8 @@
  * Messages use Telegram's HTML parse mode, which needs only three characters
  * escaped, rather than MarkdownV2's eighteen.
  */
-import { formatQ96, formatTokenAmount } from "@beacon/cca-sdk";
-import type { AuctionSummary, Chain, TokenMetadata } from "@beacon/cca-sdk";
+import { formatQ96, formatTokenAmount } from "@hammerock/cca-sdk";
+import type { AuctionSummary, Chain, TokenMetadata } from "@hammerock/cca-sdk";
 import type { Alert } from "./alerts";
 
 /** An auction plus the currency/token metadata needed to describe it to a human. */
@@ -77,7 +77,7 @@ export function renderAuctionBody(view: AuctionView): string {
 
   const lines: string[] = [];
 
-  lines.push(`<b>${escapeHtml(token.symbol)}</b> - ${link(chain, info.auction, shortAddress(info.auction))}`);
+  lines.push(`<b>${escapeHtml(token.symbol)}</b> on ${escapeHtml(chain.name)} - ${link(chain, info.auction, shortAddress(info.auction))}`);
   lines.push(`Status: ${STATUS_LABEL[status]}`);
   lines.push(`Clearing price: <b>${escapeHtml(formatQ96(state.checkpoint.clearingPriceQ96))}</b> ${escapeHtml(currency.symbol)} per ${escapeHtml(token.symbol)}`);
 
@@ -165,7 +165,7 @@ export function renderListEntry(view: AuctionView): string {
   const price = formatQ96(summary.state.checkpoint.clearingPriceQ96);
   return (
     `${link(chain, summary.info.auction, shortAddress(summary.info.auction))} ` +
-    `<b>${escapeHtml(token.symbol)}</b> - ${STATUS_LABEL[summary.status]}, ` +
+    `<b>${escapeHtml(token.symbol)}</b> (${escapeHtml(chain.name)}) - ${STATUS_LABEL[summary.status]}, ` +
     `${escapeHtml(price)} ${escapeHtml(currency.symbol)}` +
     `${summary.state.isGraduated ? ", graduated" : ""}`
   );

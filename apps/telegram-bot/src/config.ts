@@ -7,7 +7,8 @@
 import { config as loadEnv } from "dotenv";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { decimalToQ96 } from "@beacon/cca-sdk";
+import { decimalToQ96, NETWORKS, networkBySlug, networkFor, rpcSettingsFromEnv } from "@hammerock/cca-sdk";
+import type { NetworkDefaults, RpcSettings } from "@hammerock/cca-sdk";
 import type { Address } from "viem";
 import { isAddress } from "viem";
 
@@ -15,14 +16,18 @@ const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "../../..");
 loadEnv({ path: resolve(repoRoot, ".env"), quiet: true });
 
-export interface BotConfig {
-  rpcUrl: string;
-  /** Separate endpoint for eth_getLogs, when discovery is needed. */
-  logsRpcUrl?: string;
-  chainId: number;
-  lensAddress?: Address;
+/** One chain the bot watches: its RPC settings and its shared auction store. */
+export interface BotChain {
+  network: NetworkDefaults;
+  rpc: RpcSettings;
   /** Shared auction catalogue, written by `pnpm sync:auctions`. */
   storePath: string;
+}
+
+export interface BotConfig {
+  /** Every chain this one bot process watches. One token, one process. */
+  chains: BotChain[];
+  lensAddress?: Address;
   /** Where per-chat /watch registrations are persisted. */
   subscriptionsPath: string;
   /**
@@ -83,15 +88,32 @@ function parseNumber(raw: string | undefined, fallback: number, label: string): 
   return value;
 }
 
+/**
+ * BEACON_BOT_CHAINS: comma-separated slugs or ids. Default: the four mainnets
+ * plus Sepolia - the same set the directory lists.
+ */
+function parseChains(raw: string | undefined): NetworkDefaults[] {
+  if (!raw?.trim()) {
+    return Object.values(NETWORKS).filter((n) => !n.testnet || n.slug === "sepolia");
+  }
+  return raw.split(",").map((part) => {
+    const network = networkBySlug(part.trim()) ?? networkFor(Number(part.trim()));
+    if (!network) throw new Error(`BEACON_BOT_CHAINS: unknown chain "${part.trim()}".`);
+    return network;
+  });
+}
+
 export function loadConfig(argv: readonly string[] = process.argv.slice(2)): BotConfig {
   const flags = new Set(argv.filter((arg) => arg.startsWith("--")));
   const lens = process.env.BEACON_LENS_ADDRESS?.trim();
+  const dataDir = resolve(repoRoot, process.env.BEACON_DATA_DIR ?? "data");
 
   const config: BotConfig = {
-    rpcUrl: process.env.BEACON_RPC_URL ?? "https://ethereum-sepolia-rpc.publicnode.com",
-    logsRpcUrl: process.env.BEACON_LOGS_RPC_URL,
-    chainId: Number(process.env.BEACON_CHAIN_ID ?? 11155111),
-    storePath: resolve(repoRoot, process.env.BEACON_STORE_PATH ?? "data/auctions.sepolia.json"),
+    chains: parseChains(process.env.BEACON_BOT_CHAINS).map((network) => ({
+      network,
+      rpc: rpcSettingsFromEnv(network.chainId),
+      storePath: resolve(dataDir, `auctions.${network.slug}.json`),
+    })),
     subscriptionsPath: resolve(
       repoRoot,
       process.env.BEACON_SUBSCRIPTIONS_PATH ?? "data/telegram-subscriptions.json",
