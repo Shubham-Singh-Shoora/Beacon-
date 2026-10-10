@@ -25,13 +25,13 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 65
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -40,43 +40,41 @@ jobs:
 
       - name: Sync
         env:
+          SYNC_CHAINS: ${{ inputs.chains || 'ethereum,base,unichain,arbitrum,sepolia' }}
+          BEACON_RPC_URL_1: ${{ secrets.BEACON_RPC_URL_1 }}
+          BEACON_RPC_URL_8453: ${{ secrets.BEACON_RPC_URL_8453 || 'https://base-rpc.publicnode.com' }}
+          BEACON_RPC_URL_130: ${{ secrets.BEACON_RPC_URL_130 }}
+          BEACON_RPC_URL_42161: ${{ secrets.BEACON_RPC_URL_42161 }}
+          BEACON_RPC_URL_11155111: ${{ secrets.BEACON_RPC_URL_11155111 }}
+          BEACON_LOGS_RPC_URL_1: ${{ secrets.BEACON_LOGS_RPC_URL_1 }}
+          BEACON_LOGS_RPC_URL_8453: ${{ secrets.BEACON_LOGS_RPC_URL_8453 || 'https://base.gateway.tenderly.co' }}
+          BEACON_SYNC_CHUNK_SIZE_8453: ${{ vars.BEACON_SYNC_CHUNK_SIZE_8453 || '500' }}
+          BEACON_LOGS_RPC_URL_130: ${{ secrets.BEACON_LOGS_RPC_URL_130 }}
+          BEACON_LOGS_RPC_URL_42161: ${{ secrets.BEACON_LOGS_RPC_URL_42161 }}
+          BEACON_LOGS_RPC_URL_11155111: ${{ secrets.BEACON_LOGS_RPC_URL_11155111 }}
           BEACON_FALLBACK_RPC_URL_1: ${{ secrets.BEACON_FALLBACK_RPC_URL_1 }}
-          BEACON_FALLBACK_RPC_URL_8453: ${{ secrets.BEACON_FALLBACK_RPC_URL_8453 }}
+          BEACON_FALLBACK_RPC_URL_8453: ${{ secrets.BEACON_FALLBACK_RPC_URL_8453 || 'https://mainnet.base.org' }}
           BEACON_FALLBACK_RPC_URL_130: ${{ secrets.BEACON_FALLBACK_RPC_URL_130 }}
           BEACON_FALLBACK_RPC_URL_42161: ${{ secrets.BEACON_FALLBACK_RPC_URL_42161 }}
           BEACON_FALLBACK_RPC_URL_11155111: ${{ secrets.BEACON_FALLBACK_RPC_URL_11155111 }}
         # A failed chain does not stop the others; the step still fails so the
         # run shows red, and whatever did sync is committed below.
-        run: pnpm sync:auctions -- --chain "${{ github.event.inputs.chains || 'ethereum,base,unichain,arbitrum,sepolia' }}"
+        run: node .github/scripts/sync-auctions.mjs
         continue-on-error: true
         id: sync
 
       - name: Commit if auctions changed
         run: |
-          # Did anything change besides the lastSyncedBlock watermark?
-          changed=$(node -e '
-            const { execSync } = require("node:child_process");
-            const fs = require("node:fs");
-            const strip = (s) => { const j = JSON.parse(s); delete j.lastSyncedBlock; return JSON.stringify(j); };
-            let changed = 0;
-            for (const f of fs.readdirSync("data").filter((n) => /^auctions\..+\.json$/.test(n))) {
-              let before = "";
-              try { before = execSync(`git show HEAD:data/${f}`, { encoding: "utf8", maxBuffer: 1 << 26 }); } catch {}
-              if (!before || strip(before) !== strip(fs.readFileSync(`data/${f}`, "utf8"))) changed = 1;
-            }
-            process.stdout.write(String(changed));
-          ')
-          # Watermarks alone are committed once a day, so the stored block keeps moving.
-          if [ "$changed" != "1" ] && [ "$(date -u +%H%M)" -ge 0030 ]; then
-            echo "Only watermarks moved - not committing."
-            exit 0
-          fi
+          # Persist every successful checkpoint. Cron runs may be delayed beyond
+          # midnight; a clock-window test can otherwise keep rescanning old blocks.
           git config user.name "beacon-sync[bot]"
           git config user.email "beacon-sync[bot]@users.noreply.github.com"
           git add data/auctions.*.json
           git diff --cached --quiet && { echo "Nothing to commit."; exit 0; }
           git commit -m "chore(data): sync auction stores"
-          git push
+          # Rebase instead of overwriting a user commit that landed during sync.
+          git pull --rebase origin "${GITHUB_REF_NAME}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
 
       - name: Report sync failure
         if: steps.sync.outcome == 'failure'

@@ -16,17 +16,24 @@
  * Works against bare public RPCs: no lens deployment required.
  */
 import { Bot } from "grammy";
-import { assertChainMatches, createBeaconClient, deriveStatus, formatQ96 } from "@hammerock/cca-sdk";
+import type { Context } from "grammy";
+import {
+  assertChainMatches,
+  createBeaconClient,
+  deriveStatus,
+  formatQ96,
+} from "@hammerock/cca-sdk";
 import type { Address, BeaconClient } from "@hammerock/cca-sdk";
 import { isAddress } from "viem";
 import { hasNoActiveRules } from "./alerts";
 import { loadConfig } from "./config";
 import type { BotChain, BotConfig } from "./config";
 import { escapeHtml, renderAlert, renderStatus } from "./format";
-import { runSimulation } from "./simulate";
+import { offlineDemo, runSimulation } from "./simulate";
 import { createConsoleSink, createTelegramSink } from "./sink";
 import type { AlertSink } from "./sink";
 import { SubscriptionStore } from "./subscriptions";
+import type { AuctionWatch } from "./subscriptions";
 import { createWatcher, loadAuctionCatalogue, suggestAuctions } from "./watcher";
 import type { StoreAuction, Watcher } from "./watcher";
 
@@ -54,10 +61,31 @@ interface ChainRuntime {
   client: BeaconClient;
   catalogue: Map<string, StoreAuction>;
   watcher: Watcher;
+  verified: boolean;
+}
+
+async function ensureChain(runtime: ChainRuntime): Promise<boolean> {
+  if (runtime.verified) return true;
+  try {
+    await assertChainMatches(runtime.client);
+    runtime.verified = true;
+    return true;
+  } catch {
+    log(`${runtime.chain.network.name}: RPC unavailable or chain mismatch; will retry.`);
+    return false;
+  }
 }
 
 async function main(): Promise<void> {
   const config = loadConfig();
+
+  if (config.offline) {
+    const sent = await runSimulation(offlineDemo(), config.thresholds, createConsoleSink());
+    log(
+      `offline smoke test complete: ${sent} simulated alerts; no network requests or Telegram messages.`,
+    );
+    return;
+  }
 
   log(`alert rules: ${describeThresholds(config)}`);
   if (hasNoActiveRules(config.thresholds)) {
@@ -67,8 +95,7 @@ async function main(): Promise<void> {
   }
 
   // --- chains ---------------------------------------------------------------
-  // A chain whose RPC is down at startup is skipped, not fatal: the others
-  // still deserve their alerts.
+  // Keep unavailable chains registered so a later poll or command can retry.
   const runtimes: ChainRuntime[] = [];
   for (const chain of config.chains) {
     const client = createBeaconClient({
@@ -76,12 +103,6 @@ async function main(): Promise<void> {
       ...chain.rpc,
       lensAddress: config.lensAddress,
     });
-    try {
-      await assertChainMatches(client);
-    } catch (error) {
-      log(`SKIPPING ${chain.network.name}: ${(error as Error).message.split("\n")[0]}`);
-      continue;
-    }
     const catalogue = await loadAuctionCatalogue(chain.storePath, {
       onLog: (m) => log(`${chain.network.name}: ${m}`),
     });
@@ -89,47 +110,62 @@ async function main(): Promise<void> {
       thresholds: config.thresholds,
       onLog: (m) => log(`${chain.network.name}: ${m}`),
     });
-    runtimes.push({ chain, client, catalogue, watcher });
+    const runtime = { chain, client, catalogue, watcher, verified: false };
+    await ensureChain(runtime);
+    runtimes.push(runtime);
   }
   if (runtimes.length === 0) throw new Error("No chain could be reached - check the RPC settings.");
   log(`watching ${runtimes.map((r) => r.chain.network.name).join(", ")}`);
 
-  const bySlug = (slug: string) => runtimes.find((r) => r.chain.network.slug === slug.toLowerCase());
+  const bySlug = (slug: string) =>
+    runtimes.find((r) => r.chain.network.slug === slug.toLowerCase());
   const byChainId = (id: number) => runtimes.find((r) => r.chain.network.chainId === id);
-  const inCatalogues = (address: Address) =>
-    runtimes.find((r) => r.catalogue.has(address.toLowerCase()));
+  const inCatalogues = (address: Address) => {
+    const matches = runtimes.filter((r) => r.catalogue.has(address.toLowerCase()));
+    return matches.length === 1 ? matches[0] : undefined;
+  };
 
   const subscriptions = new SubscriptionStore(config.subscriptionsPath);
   await subscriptions.load();
 
   /** The chain an auction is on: as registered, else found in a catalogue. */
-  async function runtimeFor(address: Address): Promise<ChainRuntime | undefined> {
-    const recorded = await subscriptions.chainOf(address);
-    if (recorded !== undefined) return byChainId(recorded);
-    const found = inCatalogues(address);
+  async function runtimeFor(watch: AuctionWatch): Promise<ChainRuntime | undefined> {
+    if (watch.chainId !== undefined) return byChainId(watch.chainId);
+    const found = inCatalogues(watch.auction);
     // Subscriptions from before multi-chain carry no chain - learn it once.
-    if (found) await subscriptions.setChain(address, found.chain.network.chainId);
+    if (found) await subscriptions.setChain(watch.auction, found.chain.network.chainId);
     return found;
   }
 
   /** Group addresses by chain; unknown-chain addresses are reported, not polled. */
-  async function groupByChain(addresses: readonly Address[]) {
+  async function groupByChain(watches: readonly AuctionWatch[]) {
     const groups = new Map<ChainRuntime, Address[]>();
-    for (const address of addresses) {
-      const runtime = await runtimeFor(address);
+    for (const watch of watches) {
+      const { auction: address } = watch;
+      const runtime = await runtimeFor(watch);
       if (!runtime) {
         log(`no chain known for ${address} - skipping`);
         continue;
       }
       groups.set(runtime, [...(groups.get(runtime) ?? []), address]);
     }
+    for (const runtime of groups.keys()) if (!(await ensureChain(runtime))) groups.delete(runtime);
     return groups;
   }
 
   // Dev/testing seed only. Real usage is /watch.
-  if (config.watchAuctions.length > 0 && config.telegram.chatId) {
+  if (config.watchAuctions.length > 0 && (config.telegram.chatId || config.dryRun)) {
     for (const auction of config.watchAuctions) {
-      await subscriptions.watch(config.telegram.chatId, auction, inCatalogues(auction)?.chain.network.chainId);
+      const chain = inCatalogues(auction) ?? (runtimes.length === 1 ? runtimes[0] : undefined);
+      if (!chain)
+        throw new Error(
+          "Seed auction has no unambiguous chain. Set BEACON_BOT_CHAINS to its chain.",
+        );
+      await subscriptions.watch(
+        config.telegram.chatId ?? "console",
+        auction,
+        chain.chain.network.chainId,
+      );
     }
     log(
       `seeded ${config.watchAuctions.length} auction(s) from BEACON_WATCH_AUCTION_ADDRESS (dev fallback)`,
@@ -148,19 +184,27 @@ async function main(): Promise<void> {
     log("alerts -> Telegram, routed per subscribed chat");
   }
 
-  const sinkFor = (chatId: string): AlertSink =>
-    consoleSink ?? createTelegramSink(bot!, chatId);
+  const sinkFor = (chatId: string): AlertSink => consoleSink ?? createTelegramSink(bot!, chatId);
 
   /** Live first, then upcoming, then newest - across the given chains. */
   async function suggestions(scope: ChainRuntime[], limit: number) {
     const ranked: Array<{ runtime: ChainRuntime; entry: StoreAuction; head: bigint }> = [];
     for (const runtime of scope) {
-      const head = await runtime.client.publicClient.getBlockNumber();
-      for (const entry of suggestAuctions(runtime.catalogue, head, limit)) ranked.push({ runtime, entry, head });
+      if (!(await ensureChain(runtime))) continue;
+      try {
+        const head = await runtime.client.publicClient.getBlockNumber();
+        for (const entry of suggestAuctions(runtime.catalogue, head, limit))
+          ranked.push({ runtime, entry, head });
+      } catch {
+        log(`${runtime.chain.network.name}: suggestions temporarily unavailable.`);
+      }
     }
     const rank = (s: string) => (s === "live" ? 0 : s === "pending" ? 1 : 2);
     return ranked
-      .sort((a, b) => rank(deriveStatus(a.entry.info, a.head)) - rank(deriveStatus(b.entry.info, b.head)))
+      .sort(
+        (a, b) =>
+          rank(deriveStatus(a.entry.info, a.head)) - rank(deriveStatus(b.entry.info, b.head)),
+      )
       .slice(0, limit);
   }
 
@@ -176,13 +220,16 @@ async function main(): Promise<void> {
     "<b>Beacon</b> watches Uniswap CCA auctions and alerts on clearing price, graduation and closing time.",
     "",
     "/watch &lt;address&gt; [chain] — follow an auction in this chat",
-    "/unwatch &lt;address&gt; — stop following one",
+    "/unwatch &lt;address&gt; [chain] — stop following one",
     "/list — auctions this chat follows",
     "/status — current state of those auctions",
     "/suggest [chain] — auctions worth following",
     "/thresholds — the configured alert rules",
+    "/ping — check that this worker is online",
+    "/chatid — show this chat’s ID for operator setup",
     "",
-    `Chains: ${chainList}. The chain is found automatically for indexed auctions.`,
+    `Chains: ${chainList}. Include the chain when an address exists on multiple networks. Up to 20 watches per chat.`,
+    "Read-only alerts. No wallet connection, seed phrase or private key needed.",
   ].join("\n");
 
   // --- one-shot modes -----------------------------------------------------
@@ -190,7 +237,10 @@ async function main(): Promise<void> {
     const seedAddress = config.watchAuctions[0];
     const seed = seedAddress
       ? { runtime: inCatalogues(seedAddress), address: seedAddress }
-      : await suggestions(runtimes, 1).then((s) => ({ runtime: s[0]?.runtime, address: s[0]?.entry.auction }));
+      : await suggestions(runtimes, 1).then((s) => ({
+          runtime: s[0]?.runtime,
+          address: s[0]?.entry.auction,
+        }));
     if (!seed.runtime || !seed.address) {
       log("No auction available to base the simulation on. Run `pnpm sync:auctions` first.");
       process.exitCode = 1;
@@ -216,7 +266,7 @@ async function main(): Promise<void> {
   }
 
   if (config.once) {
-    const auctions = await subscriptions.allAuctions();
+    const auctions = await subscriptions.allWatches();
     if (auctions.length === 0) {
       log("No chat is watching any auction. Use /watch, or set BEACON_WATCH_AUCTION_ADDRESS.");
       return;
@@ -235,10 +285,14 @@ async function main(): Promise<void> {
 
   // --- Telegram commands --------------------------------------------------
   if (bot) {
-    const reply = (ctx: { reply: (t: string, o?: object) => Promise<unknown> }, text: string) =>
-      ctx.reply(text, { parse_mode: "HTML", link_preview_options: { is_disabled: true } });
+    const reply = (ctx: Context, text: string) =>
+      ctx.chat ? createTelegramSink(bot!, String(ctx.chat.id)).send(text) : Promise.resolve();
 
     bot.command(["start", "help"], (ctx) => reply(ctx, HELP));
+    bot.command("ping", (ctx) =>
+      reply(ctx, "Beacon is online. Use /suggest to discover auctions, then /watch to follow one."),
+    );
+    bot.command("chatid", (ctx) => reply(ctx, `This chat’s ID: <code>${ctx.chat.id}</code>`));
 
     bot.command("thresholds", (ctx) =>
       reply(ctx, `Alert rules: ${escapeHtml(describeThresholds(config))}`),
@@ -254,58 +308,101 @@ async function main(): Promise<void> {
       let runtime: ChainRuntime | undefined;
       if (rawChain) {
         runtime = bySlug(rawChain);
-        if (!runtime) return reply(ctx, `Unknown chain "${escapeHtml(rawChain)}". Chains: ${chainList}.`);
+        if (!runtime)
+          return reply(ctx, `Unknown chain "${escapeHtml(rawChain)}". Chains: ${chainList}.`);
       } else {
         runtime = inCatalogues(address);
         if (!runtime) {
           return reply(
             ctx,
-            "That auction is not in any indexed catalogue - it may be newer than the last sync. " +
+            "That address has no unique match in the indexed catalogues. " +
               `Name its chain: <code>/watch ${address} base</code> (chains: ${chainList}).`,
           );
         }
       }
 
       const chatId = String(ctx.chat.id);
-      const added = await subscriptions.watch(chatId, address, runtime.chain.network.chainId);
-      if (!added) return reply(ctx, `Already watching <code>${address}</code>.`);
-
-      const known = runtime.catalogue.get(address.toLowerCase());
-      const head = await runtime.client.publicClient.getBlockNumber();
-      const note = known
-        ? describe(runtime, known, head)
-        : `on ${escapeHtml(runtime.chain.network.name)} — not in the indexed catalogue yet; alerts start once it can be read`;
-      return reply(ctx, `Now watching <code>${address}</code>\n${note}`);
+      if (!(await ensureChain(runtime)))
+        return reply(ctx, "This network is temporarily unavailable. Please try again shortly.");
+      const watches = await subscriptions.watchesFor(chatId);
+      if (
+        watches.some(
+          (w) =>
+            w.chainId === runtime.chain.network.chainId &&
+            w.auction.toLowerCase() === address.toLowerCase(),
+        )
+      ) {
+        return reply(
+          ctx,
+          `Already watching <code>${address}</code> on ${escapeHtml(runtime.chain.network.name)}.`,
+        );
+      }
+      if (watches.length >= 20)
+        return reply(ctx, "This chat can follow up to 20 auctions. Use /unwatch to make room.");
+      const view = (await runtime.watcher.viewsFor([address]))[0];
+      if (!view)
+        return reply(
+          ctx,
+          "Could not verify this auction on that network. Check its address and chain, or try again when the RPC recovers. Your watch list was not changed.",
+        );
+      await subscriptions.watch(chatId, address, runtime.chain.network.chainId);
+      return reply(
+        ctx,
+        `Now watching <code>${address}</code> on ${escapeHtml(runtime.chain.network.name)}.\n\n${renderStatus(view)}`,
+      );
     });
 
     bot.command("unwatch", async (ctx) => {
-      const rawAddress = (ctx.match ?? "").trim().split(/\s+/)[0] ?? "";
-      if (!isAddress(rawAddress)) return reply(ctx, "Usage: <code>/unwatch 0x…</code>");
+      const [rawAddress = "", rawChain] = (ctx.match ?? "").trim().split(/\s+/);
+      if (!isAddress(rawAddress)) return reply(ctx, "Usage: <code>/unwatch 0x… [chain]</code>");
       const address = rawAddress as Address;
-
-      const removed = await subscriptions.unwatch(String(ctx.chat.id), address);
-      if (removed && (await subscriptions.subscribersOf(address)).length === 0) {
-        (await runtimeFor(address))?.watcher.forget(address);
+      const runtime = rawChain ? bySlug(rawChain) : undefined;
+      if (rawChain && !runtime) return reply(ctx, `Unknown chain. Chains: ${chainList}.`);
+      const matches = (await subscriptions.watchesFor(String(ctx.chat.id))).filter(
+        (w) =>
+          w.auction.toLowerCase() === address.toLowerCase() &&
+          (!runtime || w.chainId === runtime.chain.network.chainId),
+      );
+      if (matches.length > 1)
+        return reply(
+          ctx,
+          "Include its chain: <code>/unwatch &lt;address&gt; &lt;chain&gt;</code>.",
+        );
+      const watch = matches[0];
+      const removed = await subscriptions.unwatch(
+        String(ctx.chat.id),
+        address,
+        watch?.chainId ?? runtime?.chain.network.chainId,
+      );
+      if (
+        removed &&
+        watch &&
+        (await subscriptions.subscribersOf(address, watch.chainId)).length === 0
+      ) {
+        (await runtimeFor(watch))?.watcher.forget(address);
       }
       return reply(
         ctx,
-        removed ? `Stopped watching <code>${address}</code>.` : "This chat was not watching that auction.",
+        removed
+          ? `Stopped watching <code>${address}</code>.`
+          : "This chat was not watching that auction.",
       );
     });
 
     bot.command("list", async (ctx) => {
-      const auctions = await subscriptions.auctionsFor(String(ctx.chat.id));
+      const auctions = await subscriptions.watchesFor(String(ctx.chat.id));
       if (auctions.length === 0) {
         return reply(ctx, "This chat is not watching any auctions yet. Try /suggest, then /watch.");
       }
       const lines: string[] = [];
-      for (const auction of auctions) {
-        const runtime = await runtimeFor(auction);
+      for (const watch of auctions) {
+        const { auction } = watch;
+        const runtime = await runtimeFor(watch);
         const entry = runtime?.catalogue.get(auction.toLowerCase());
         lines.push(
           runtime && entry
-            ? describe(runtime, entry, await runtime.client.publicClient.getBlockNumber())
-            : `<code>${auction}</code>${runtime ? ` on ${escapeHtml(runtime.chain.network.name)}` : ""}`,
+            ? `<code>${auction}</code> — ${escapeHtml(entry.token.symbol.slice(0, 24))} on ${escapeHtml(runtime.chain.network.name)}`
+            : `<code>${auction}</code>${runtime ? ` on ${escapeHtml(runtime.chain.network.name)}` : " (chain unavailable)"}`,
         );
       }
       return reply(ctx, `Watching ${auctions.length}:\n${lines.join("\n")}`);
@@ -313,8 +410,11 @@ async function main(): Promise<void> {
 
     bot.command("suggest", async (ctx) => {
       const rawChain = (ctx.match ?? "").trim();
-      const scope = rawChain ? runtimes.filter((r) => r.chain.network.slug === rawChain.toLowerCase()) : runtimes;
-      if (scope.length === 0) return reply(ctx, `Unknown chain "${escapeHtml(rawChain)}". Chains: ${chainList}.`);
+      const scope = rawChain
+        ? runtimes.filter((r) => r.chain.network.slug === rawChain.toLowerCase())
+        : runtimes;
+      if (scope.length === 0)
+        return reply(ctx, `Unknown chain "${escapeHtml(rawChain)}". Chains: ${chainList}.`);
       const picks = await suggestions(scope, 5);
       if (picks.length === 0) {
         return reply(ctx, "The auction catalogue is empty. Run <code>pnpm sync:auctions</code>.");
@@ -328,7 +428,7 @@ async function main(): Promise<void> {
     });
 
     bot.command("status", async (ctx) => {
-      const auctions = await subscriptions.auctionsFor(String(ctx.chat.id));
+      const auctions = await subscriptions.watchesFor(String(ctx.chat.id));
       if (auctions.length === 0) return reply(ctx, "This chat is not watching any auctions.");
 
       let shown = 0;
@@ -341,13 +441,26 @@ async function main(): Promise<void> {
       return shown === 0 ? reply(ctx, "Could not read any of those auctions.") : undefined;
     });
 
-    bot.catch((error) => console.error("[beacon-bot] telegram error:", error.message));
-    void bot.start({ onStart: (info) => log(`telegram polling started as @${info.username}`) });
+    bot.catch(async (error) => {
+      log("Telegram command failed; check RPC connectivity and subscription storage.");
+      await reply(
+        error.ctx,
+        "This request could not be completed. Please try again shortly.",
+      ).catch(() => undefined);
+    });
+    void bot
+      .start({ onStart: (info) => log(`telegram polling started as @${info.username}`) })
+      .catch(() => {
+        log(
+          "Telegram polling stopped. Check the token, webhook configuration, and that only one worker uses this token.",
+        );
+        process.exit(1);
+      });
   }
 
   // --- baseline + poll loop ----------------------------------------------
   async function pollOnce(isBaseline: boolean): Promise<void> {
-    const auctions = await subscriptions.allAuctions();
+    const auctions = await subscriptions.allWatches();
     if (auctions.length === 0) return;
 
     for (const [runtime, group] of await groupByChain(auctions)) {
@@ -356,7 +469,9 @@ async function main(): Promise<void> {
         result = await runtime.watcher.tick(group);
       } catch (error) {
         // One chain's RPC failing must not silence the others.
-        log(`${runtime.chain.network.name}: poll failed: ${(error as Error).message.split("\n")[0]}`);
+        log(
+          `${runtime.chain.network.name}: poll failed: ${(error as Error).message.split("\n")[0]}`,
+        );
         continue;
       }
       const { alerts, views } = result;
@@ -374,8 +489,12 @@ async function main(): Promise<void> {
 
       for (const { alert, view } of alerts) {
         // Route each alert only to the chats that asked for that auction.
-        const chatIds = consoleSink ? ["console"] : await subscriptions.subscribersOf(alert.auction);
-        log(`ALERT ${alert.kind} on ${alert.auction} (${runtime.chain.network.name}) -> ${chatIds.length} chat(s)`);
+        const chatIds = consoleSink
+          ? ["console"]
+          : await subscriptions.subscribersOf(alert.auction, runtime.chain.network.chainId);
+        log(
+          `ALERT ${alert.kind} on ${alert.auction} (${runtime.chain.network.name}) -> ${chatIds.length} chat(s)`,
+        );
         const message = renderAlert(alert, view);
         for (const chatId of chatIds) {
           try {
@@ -401,7 +520,7 @@ async function main(): Promise<void> {
     if (stopping) return;
     stopping = true;
     log("shutting down...");
-    if (bot) await bot.stop();
+    if (bot?.isRunning()) await bot.stop();
     process.exit(0);
   };
   process.once("SIGINT", () => void shutdown());

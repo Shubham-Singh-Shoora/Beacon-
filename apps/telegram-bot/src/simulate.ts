@@ -1,25 +1,71 @@
 /**
  * Scripted state changes pushed through the real alert pipeline.
  *
- * Every CCA auction currently on Sepolia has already ended, so there is nothing
- * live whose clearing price can actually move. Rather than ship an alert path
- * that has never produced a message, this drives the genuine rule engine and the
- * genuine renderer with a real auction's real token/currency metadata, and
- * delivers through the configured sink.
- *
- * Only the snapshot sequence is synthetic. The rules, the copy, the symbols and
- * the delivery are all the production path. Once Phase 5 deploys a live auction
- * this becomes redundant for the demo, but stays useful as a smoke test.
+ * The offline fixture needs no network. Online simulation can use real auction
+ * metadata, but every state transition remains fictional and every message is
+ * explicitly labeled. Both modes exercise the real rule engine and renderer.
  */
-import { decimalToQ96 } from "@hammerock/cca-sdk";
+import { BLOCK_TIME_SECONDS, decimalToQ96 } from "@hammerock/cca-sdk";
+import { zeroAddress } from "viem";
+import { sepolia } from "viem/chains";
 import { evaluateAlerts } from "./alerts";
 import type { AlertThresholds, AuctionSnapshot } from "./alerts";
 import { renderAlert } from "./format";
 import type { AuctionView } from "./format";
 import type { AlertSink } from "./sink";
 
+/** Deliberately fictional. No RPC, credentials, wallet, or live auction needed. */
+export function offlineDemo(): AuctionView {
+  const auction = "0x0000000000000000000000000000000000000001";
+  const token = "0x0000000000000000000000000000000000000002";
+  return {
+    chain: sepolia,
+    token: {
+      address: token,
+      name: "Simulation token",
+      symbol: "DEMO",
+      decimals: 18,
+      isNative: false,
+    },
+    currency: { address: zeroAddress, name: "Ether", symbol: "ETH", decimals: 18, isNative: true },
+    summary: {
+      info: {
+        auction,
+        token,
+        currency: zeroAddress,
+        totalSupply: 10n ** 24n,
+        startBlock: 100n,
+        endBlock: 400n,
+        floorPriceQ96: 1n,
+        tickSpacing: 1n,
+      },
+      state: {
+        checkpoint: {
+          clearingPriceQ96: 1n,
+          currencyRaisedAtClearingPriceQ96X7: 0n,
+          cumulativeMpsPerPrice: 0n,
+          cumulativeMps: 0,
+          prevBlock: 0n,
+          nextBlock: 0n,
+        },
+        currencyRaised: 0n,
+        totalCleared: 0n,
+        isGraduated: false,
+      },
+      blockNumber: 99n,
+      status: "pending",
+      clearingPrice: "0",
+      supplyScheduleProgress: 0,
+      hasClearedSupply: false,
+      blocksRemaining: 1n,
+      secondsRemaining: 12,
+    },
+  };
+}
+
 /** Build a view whose summary reflects a synthetic snapshot, for rendering. */
 function viewWithSnapshot(base: AuctionView, snapshot: AuctionSnapshot): AuctionView {
+  const totalCleared = snapshot.hasClearedSupply ? base.summary.info.totalSupply / 4n : 0n;
   return {
     ...base,
     summary: {
@@ -28,13 +74,15 @@ function viewWithSnapshot(base: AuctionView, snapshot: AuctionSnapshot): Auction
       supplyScheduleProgress: snapshot.supplyScheduleProgress,
       hasClearedSupply: snapshot.hasClearedSupply,
       secondsRemaining: snapshot.secondsRemaining,
-      blocksRemaining: BigInt(Math.round(snapshot.secondsRemaining / 12)),
+      blocksRemaining: BigInt(
+        Math.round(snapshot.secondsRemaining / (BLOCK_TIME_SECONDS[base.chain.id] ?? 12)),
+      ),
       state: {
         ...base.summary.state,
         isGraduated: snapshot.isGraduated,
-        // Show plausible non-zero amounts once supply has cleared.
-        currencyRaised: snapshot.hasClearedSupply ? base.summary.info.totalSupply / 40n : 0n,
-        totalCleared: snapshot.hasClearedSupply ? base.summary.info.totalSupply / 4n : 0n,
+        // Illustrative amount at the scripted price, in the currency's base units.
+        currencyRaised: (totalCleared * snapshot.clearingPriceQ96) / (1n << 96n),
+        totalCleared,
         checkpoint: {
           ...base.summary.state.checkpoint,
           clearingPriceQ96: snapshot.clearingPriceQ96,
@@ -53,7 +101,7 @@ export async function runSimulation(
 
   // Anchor the script to the operator's own threshold when they set one, so the
   // crossing they configured is the crossing they see.
-  const priceAbove = thresholds.priceAboveQ96 ?? decimalToQ96("0.000000000000002");
+  const priceAbove = thresholds.priceAboveQ96 ?? decimalToQ96("0.0001");
   const below = priceAbove / 2n;
   const above = priceAbove * 2n;
   const minutesLeft = thresholds.minutesLeft ?? 15;
@@ -68,9 +116,7 @@ export async function runSimulation(
     minutesLeft,
   };
   if (thresholds.priceAboveQ96 === undefined) {
-    console.log(
-      `  (BEACON_ALERT_PRICE_ABOVE is unset - simulating against a default threshold)`,
-    );
+    console.log(`  (BEACON_ALERT_PRICE_ABOVE is unset - simulating against a default threshold)`);
   }
 
   const script: Array<{ label: string; snapshot: AuctionSnapshot }> = [
@@ -170,7 +216,10 @@ export async function runSimulation(
     );
 
     for (const alert of alerts) {
-      await sink.send(renderAlert(alert, viewWithSnapshot(base, step.snapshot)));
+      await sink.send(
+        "<b>SIMULATION — scripted activity, not a live alert</b>\n\n" +
+          renderAlert(alert, viewWithSnapshot(base, step.snapshot)),
+      );
       sent++;
     }
     previous = step.snapshot;

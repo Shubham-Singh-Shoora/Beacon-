@@ -7,7 +7,13 @@
 import { config as loadEnv } from "dotenv";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { decimalToQ96, NETWORKS, networkBySlug, networkFor, rpcSettingsFromEnv } from "@hammerock/cca-sdk";
+import {
+  decimalToQ96,
+  NETWORKS,
+  networkBySlug,
+  networkFor,
+  rpcSettingsFromEnv,
+} from "@hammerock/cca-sdk";
 import type { NetworkDefaults, RpcSettings } from "@hammerock/cca-sdk";
 import type { Address } from "viem";
 import { isAddress } from "viem";
@@ -53,6 +59,7 @@ export interface BotConfig {
   once: boolean;
   /** Push a scripted sequence of state changes through the real alert pipeline. */
   simulate: boolean;
+  offline: boolean;
 }
 
 function parseAddressList(raw: string | undefined, label: string): Address[] {
@@ -96,70 +103,74 @@ function parseChains(raw: string | undefined): NetworkDefaults[] {
   if (!raw?.trim()) {
     return Object.values(NETWORKS).filter((n) => !n.testnet || n.slug === "sepolia");
   }
-  return raw.split(",").map((part) => {
+  return [...new Set(raw.split(",").map((part) => part.trim()))].map((part) => {
     const network = networkBySlug(part.trim()) ?? networkFor(Number(part.trim()));
     if (!network) throw new Error(`BEACON_BOT_CHAINS: unknown chain "${part.trim()}".`);
     return network;
   });
 }
 
-export function loadConfig(argv: readonly string[] = process.argv.slice(2)): BotConfig {
+export function loadConfig(
+  argv: readonly string[] = process.argv.slice(2),
+  env: Record<string, string | undefined> = process.env,
+): BotConfig {
   const flags = new Set(argv.filter((arg) => arg.startsWith("--")));
-  const lens = process.env.BEACON_LENS_ADDRESS?.trim();
-  const dataDir = resolve(repoRoot, process.env.BEACON_DATA_DIR ?? "data");
+  const lens = env.BEACON_LENS_ADDRESS?.trim();
+  const dataDir = resolve(repoRoot, env.BEACON_DATA_DIR ?? "data");
 
   const config: BotConfig = {
-    chains: parseChains(process.env.BEACON_BOT_CHAINS).map((network) => ({
+    chains: parseChains(env.BEACON_BOT_CHAINS).map((network) => ({
       network,
-      rpc: rpcSettingsFromEnv(network.chainId),
+      rpc: rpcSettingsFromEnv(network.chainId, env),
       storePath: resolve(dataDir, `auctions.${network.slug}.json`),
     })),
     subscriptionsPath: resolve(
       repoRoot,
-      process.env.BEACON_SUBSCRIPTIONS_PATH ?? "data/telegram-subscriptions.json",
+      (env.BEACON_SUBSCRIPTIONS_PATH ?? "data/telegram-subscriptions.json") +
+        (flags.has("--dry-run") ? ".dry-run" : ""),
     ),
     // Empty is correct and supported: reads then run through an eth_call state
     // override, so the bot works with no lens deployment at all.
     lensAddress: lens && lens.length > 0 && isAddress(lens) ? (lens as Address) : undefined,
     watchAuctions: parseAddressList(
-      process.env.BEACON_WATCH_AUCTION_ADDRESS,
+      env.BEACON_WATCH_AUCTION_ADDRESS,
       "BEACON_WATCH_AUCTION_ADDRESS",
     ),
-    pollIntervalMs: parseNumber(
-      process.env.BEACON_POLL_INTERVAL_SECONDS,
-      15,
-      "BEACON_POLL_INTERVAL_SECONDS",
-    ) * 1000,
+    pollIntervalMs:
+      parseNumber(env.BEACON_POLL_INTERVAL_SECONDS, 15, "BEACON_POLL_INTERVAL_SECONDS") * 1000,
     telegram: {
-      botToken: process.env.TELEGRAM_BOT_TOKEN?.trim() || undefined,
-      chatId: process.env.TELEGRAM_CHAT_ID?.trim() || undefined,
+      botToken: env.TELEGRAM_BOT_TOKEN?.trim() || undefined,
+      chatId: env.TELEGRAM_CHAT_ID?.trim() || undefined,
     },
     thresholds: {
-      priceAboveQ96: parsePriceThreshold(
-        process.env.BEACON_ALERT_PRICE_ABOVE,
-        "BEACON_ALERT_PRICE_ABOVE",
-      ),
-      priceBelowQ96: parsePriceThreshold(
-        process.env.BEACON_ALERT_PRICE_BELOW,
-        "BEACON_ALERT_PRICE_BELOW",
-      ),
-      minutesLeft: process.env.BEACON_ALERT_MINUTES_LEFT
-        ? parseNumber(process.env.BEACON_ALERT_MINUTES_LEFT, 15, "BEACON_ALERT_MINUTES_LEFT")
+      priceAboveQ96: parsePriceThreshold(env.BEACON_ALERT_PRICE_ABOVE, "BEACON_ALERT_PRICE_ABOVE"),
+      priceBelowQ96: parsePriceThreshold(env.BEACON_ALERT_PRICE_BELOW, "BEACON_ALERT_PRICE_BELOW"),
+      minutesLeft: env.BEACON_ALERT_MINUTES_LEFT
+        ? parseNumber(env.BEACON_ALERT_MINUTES_LEFT, 15, "BEACON_ALERT_MINUTES_LEFT")
         : 15,
     },
     dryRun: flags.has("--dry-run"),
     once: flags.has("--once"),
     simulate: flags.has("--simulate"),
+    offline: flags.has("--offline"),
   };
+
+  if (config.offline && (!config.dryRun || !config.simulate)) {
+    throw new Error("--offline requires --dry-run --simulate; it never sends Telegram messages.");
+  }
 
   if (!config.dryRun) {
     const missing: string[] = [];
     if (!config.telegram.botToken) missing.push("TELEGRAM_BOT_TOKEN");
-    if (!config.telegram.chatId) missing.push("TELEGRAM_CHAT_ID");
+    if (
+      (config.once || config.simulate || config.watchAuctions.length > 0) &&
+      !config.telegram.chatId
+    )
+      missing.push("TELEGRAM_CHAT_ID (only needed for one-shot delivery or seeded subscriptions)");
     if (missing.length > 0) {
       throw new Error(
         `Missing ${missing.join(" and ")} in .env.\n` +
-          `Get a token from @BotFather, then set TELEGRAM_CHAT_ID to the channel or DM id.\n` +
+          `Get a token from @BotFather. Normal polling learns each chat ID from its /watch command.\n` +
           `Or run with --dry-run to print alerts to the console instead of sending them.`,
       );
     }

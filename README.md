@@ -195,6 +195,8 @@ cp .env.example .env      # RPC URLs, chain id, optional keys
 | `pnpm web` | Directory site on :3000 |
 | `pnpm bot` | Telegram bot in watch mode (`-- --dry-run` needs no token) |
 | `pnpm bot:start` | Telegram bot for a server - no file watching |
+| `pnpm bot:smoke` | Offline alert lifecycle test; no credentials, RPC, or messages |
+| `pnpm bot:check` | Read-only Telegram token and webhook diagnostics |
 | `pnpm agent -- <command>` | The `cca-agent` CLI against the root `.env` |
 | `pnpm sync:auctions -- --chain <slug\|mainnets\|all>` | Discover auctions into `data/auctions.<chain>.json` and cache their config |
 | `pnpm --filter @hammerock/cca-sdk check:live` | Live read check against a real chain |
@@ -215,6 +217,8 @@ pnpm publish -r --filter @hammerock/cca-sdk --filter @hammerock/cca-widget --fil
 | Auction discovery | GitHub Actions, every 30 min ([sync-auctions.yml](.github/workflows/sync-auctions.yml)) | No |
 | CI | GitHub Actions on every push and PR ([ci.yml](.github/workflows/ci.yml)) | No |
 | Telegram bot | Any always-on host: `pnpm bot:start` | **Yes** - it polls every 15s |
+
+See the [production deployment checklist](docs/production-readiness.md) and [Telegram worker runbook](apps/telegram-bot/README.md) for provider setup, persistent storage, monitoring, and verification.
 
 ### RPC: free by default
 

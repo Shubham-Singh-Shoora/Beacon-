@@ -12,6 +12,7 @@ export function SiteFooter() {
       </div>
       <div className="footer-links">
         <Link href="/learn">How it works</Link>
+        <Link href="/telegram">Telegram alerts</Link>
         <Link href="/developers">For developers</Link>
         <a href="https://github.com/Shubham-Singh-Shoora/Beacon-" target="_blank" rel="noreferrer">
           GitHub <Icon name="external" width="15" height="15" />

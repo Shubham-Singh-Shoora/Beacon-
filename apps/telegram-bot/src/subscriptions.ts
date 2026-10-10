@@ -1,181 +1,203 @@
-/**
- * Per-chat auction subscriptions.
- *
- * Who gets alerted about what is a property of the CHAT, not of the process.
- * A user registers auctions with `/watch <address>` and those survive restarts,
- * so the bot is usable by more than the person holding the .env file.
- *
- * `BEACON_WATCH_AUCTION_ADDRESS` remains only as a dev/testing seed.
- */
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import { getAddress } from "viem";
+import { randomUUID } from "node:crypto";
+import { getAddress, isAddress } from "viem";
 import type { Address } from "@hammerock/cca-sdk";
 
+export interface AuctionWatch {
+  auction: Address;
+  chainId?: number;
+}
 export interface ChatSubscription {
   chatId: string;
   auctions: Address[];
 }
+type Chats = Map<string, Map<string, AuctionWatch>>;
+const keyOf = (watch: AuctionWatch) => `${watch.chainId ?? 0}:${watch.auction.toLowerCase()}`;
+const matches = (watch: AuctionWatch, address: Address, chainId?: number) =>
+  watch.auction.toLowerCase() === address.toLowerCase() &&
+  (chainId === undefined || watch.chainId === chainId);
 
-interface SerializedFile {
-  version: 1;
-  chats: Record<string, { auctions: string[] }>;
-  /**
-   * Which chain each watched auction is on (lowercase address -> chain id).
-   * Optional: files written before multi-chain have none, and those auctions
-   * are matched to a chain from the stores at startup.
-   */
-  chains?: Record<string, number>;
-}
-
-function normalise(address: Address): string {
-  return address.toLowerCase();
-}
-
-/**
- * Always display the EIP-55 checksummed form, whatever case the user typed.
- * Without this, watching an auction with a lowercase address would overwrite
- * the checksummed version already on record.
- */
-function toDisplay(address: Address): Address {
-  try {
-    return getAddress(address);
-  } catch {
-    return address;
-  }
-}
-
+/** One worker owns this file. Writes are serialized and atomically replaced. */
 export class SubscriptionStore {
-  private chats = new Map<string, Set<string>>();
-  /** Preserves the checksummed form for display. */
-  private display = new Map<string, Address>();
-  /** Chain id per auction, when known. */
-  private chainIds = new Map<string, number>();
-  private loaded = false;
+  private chats: Chats = new Map();
+  private loading?: Promise<void>;
+  private queue: Promise<unknown> = Promise.resolve();
+  constructor(
+    private readonly filePath: string,
+    private readonly maxPerChat = 20,
+  ) {}
 
-  constructor(private readonly filePath: string) {}
-
-  async load(): Promise<void> {
-    if (this.loaded) return;
-    this.loaded = true;
-
+  load(): Promise<void> {
+    this.loading ??= this.read();
+    return this.loading;
+  }
+  private async read(): Promise<void> {
+    let raw: string;
     try {
-      const raw = await readFile(this.filePath, "utf8");
-      const parsed = JSON.parse(raw) as SerializedFile;
-      for (const [chatId, entry] of Object.entries(parsed.chats ?? {})) {
-        const set = new Set<string>();
-        for (const address of entry.auctions ?? []) {
-          const key = normalise(address as Address);
-          set.add(key);
-          this.display.set(key, toDisplay(address as Address));
+      raw = await readFile(this.filePath, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    const parsed = JSON.parse(raw) as {
+      version?: number;
+      chats?: Record<string, { auctions?: unknown[]; watches?: unknown[] }>;
+      chains?: Record<string, number>;
+    };
+    if (
+      ![1, 2].includes(parsed.version ?? 0) ||
+      !parsed.chats ||
+      typeof parsed.chats !== "object" ||
+      Array.isArray(parsed.chats)
+    ) {
+      throw new Error(
+        "Invalid subscriptions file; restore it from backup before starting the bot.",
+      );
+    }
+    const next: Chats = new Map();
+    for (const [chatId, entry] of Object.entries(parsed.chats)) {
+      const watches = new Map<string, AuctionWatch>();
+      const entries = parsed.version === 1 ? entry?.auctions : entry?.watches;
+      if (!Array.isArray(entries))
+        throw new Error("Invalid subscription entry; existing file was not changed.");
+      for (const value of entries) {
+        const candidate =
+          parsed.version === 1
+            ? {
+                auction: value,
+                chainId:
+                  typeof value === "string" ? parsed.chains?.[value.toLowerCase()] : undefined,
+              }
+            : (value as Partial<AuctionWatch>);
+        if (
+          !candidate ||
+          typeof candidate.auction !== "string" ||
+          !isAddress(candidate.auction) ||
+          (candidate.chainId !== undefined &&
+            (!Number.isSafeInteger(candidate.chainId) || candidate.chainId <= 0))
+        ) {
+          throw new Error("Invalid auction subscription; existing file was not changed.");
         }
-        this.chats.set(chatId, set);
+        const watch = { auction: getAddress(candidate.auction), chainId: candidate.chainId };
+        watches.set(keyOf(watch), watch);
       }
-      for (const [key, chainId] of Object.entries(parsed.chains ?? {})) {
-        this.chainIds.set(key.toLowerCase(), chainId);
-      }
-    } catch {
-      // No file yet - a fresh install starts with no subscriptions.
+      if (watches.size) next.set(chatId, watches);
     }
+    this.chats = next;
+  }
+  private async change<T>(mutate: (next: Chats) => T): Promise<T> {
+    await this.load();
+    const operation = this.queue.then(async () => {
+      const next = new Map([...this.chats].map(([chat, watches]) => [chat, new Map(watches)]));
+      const result = mutate(next);
+      const chats = Object.fromEntries(
+        [...next].map(([chat, watches]) => [chat, { watches: [...watches.values()] }]),
+      );
+      await mkdir(dirname(this.filePath), { recursive: true });
+      const temporary = `${this.filePath}.${randomUUID()}.tmp`;
+      try {
+        await writeFile(temporary, JSON.stringify({ version: 2, chats }, null, 2) + "\n", {
+          encoding: "utf8",
+          mode: 0o600,
+        });
+        await rename(temporary, this.filePath);
+      } finally {
+        await rm(temporary, { force: true });
+      }
+      this.chats = next;
+      return result;
+    });
+    this.queue = operation.catch(() => undefined);
+    return operation;
+  }
+  private async ready() {
+    await this.load();
+    await this.queue;
   }
 
-  private async persist(): Promise<void> {
-    const chats: SerializedFile["chats"] = {};
-    for (const [chatId, set] of this.chats) {
-      chats[chatId] = {
-        auctions: [...set].map((key) => this.display.get(key) ?? key),
-      };
-    }
-    await mkdir(dirname(this.filePath), { recursive: true });
-    await writeFile(
-      this.filePath,
-      JSON.stringify(
-        { version: 1, chats, chains: Object.fromEntries(this.chainIds) } satisfies SerializedFile,
-        null,
-        2,
-      ) + "\n",
-      "utf8",
-    );
-  }
-
-  /** @returns false when the chat was already watching it. */
   async watch(chatId: string, auction: Address, chainId?: number): Promise<boolean> {
-    await this.load();
-    const key = normalise(auction);
-    this.display.set(key, toDisplay(auction));
-    if (chainId !== undefined && this.chainIds.get(key) !== chainId) {
-      this.chainIds.set(key, chainId);
-      await this.persist();
-    }
-
-    const set = this.chats.get(chatId) ?? new Set<string>();
-    if (set.has(key)) return false;
-
-    set.add(key);
-    this.chats.set(chatId, set);
-    await this.persist();
-    return true;
+    if (
+      !isAddress(auction) ||
+      (chainId !== undefined && (!Number.isSafeInteger(chainId) || chainId <= 0))
+    )
+      throw new Error("Invalid auction or chain.");
+    return this.change((next) => {
+      const watch = { auction: getAddress(auction), chainId };
+      const watches = next.get(chatId) ?? new Map<string, AuctionWatch>();
+      const key = keyOf(watch);
+      if (watches.has(key)) return false;
+      if (watches.size >= this.maxPerChat)
+        throw new Error(
+          `This chat can follow up to ${this.maxPerChat} auctions. Use /unwatch to make room.`,
+        );
+      watches.set(key, watch);
+      next.set(chatId, watches);
+      return true;
+    });
   }
-
-  /** @returns false when the chat was not watching it. */
-  async unwatch(chatId: string, auction: Address): Promise<boolean> {
-    await this.load();
-    const set = this.chats.get(chatId);
-    if (!set?.delete(normalise(auction))) return false;
-
-    if (set.size === 0) this.chats.delete(chatId);
-    await this.persist();
-    return true;
+  async unwatch(chatId: string, auction: Address, chainId?: number): Promise<boolean> {
+    return this.change((next) => {
+      const watches = next.get(chatId);
+      if (!watches) return false;
+      const targets = [...watches].filter(([, watch]) => matches(watch, auction, chainId));
+      if (targets.length > 1 && chainId === undefined)
+        throw new Error(
+          "This address is watched on more than one chain. Use /unwatch <address> <chain>.",
+        );
+      for (const [key] of targets) watches.delete(key);
+      if (!watches.size) next.delete(chatId);
+      return targets.length > 0;
+    });
   }
-
+  async watchesFor(chatId: string): Promise<AuctionWatch[]> {
+    await this.ready();
+    return [...(this.chats.get(chatId)?.values() ?? [])];
+  }
+  async allWatches(): Promise<AuctionWatch[]> {
+    await this.ready();
+    return [...new Map([...this.chats.values()].flatMap((watches) => [...watches])).values()];
+  }
   async auctionsFor(chatId: string): Promise<Address[]> {
-    await this.load();
-    const set = this.chats.get(chatId) ?? new Set<string>();
-    return [...set].map((key) => this.display.get(key) ?? (key as Address));
+    return [...new Set((await this.watchesFor(chatId)).map((w) => w.auction))];
   }
-
-  /** Every auction any chat is watching - what the poll loop must read. */
   async allAuctions(): Promise<Address[]> {
-    await this.load();
-    const union = new Set<string>();
-    for (const set of this.chats.values()) for (const key of set) union.add(key);
-    return [...union].map((key) => this.display.get(key) ?? (key as Address));
+    return [...new Set((await this.allWatches()).map((w) => w.auction))];
   }
-
-  /** Chats that should be told about an alert on this auction. */
-  async subscribersOf(auction: Address): Promise<string[]> {
-    await this.load();
-    const key = normalise(auction);
-    const result: string[] = [];
-    for (const [chatId, set] of this.chats) if (set.has(key)) result.push(chatId);
-    return result;
+  async subscribersOf(auction: Address, chainId?: number): Promise<string[]> {
+    await this.ready();
+    return [...this.chats]
+      .filter(([, watches]) => [...watches.values()].some((w) => matches(w, auction, chainId)))
+      .map(([chat]) => chat);
   }
-
   async allChats(): Promise<ChatSubscription[]> {
-    await this.load();
-    return [...this.chats.entries()].map(([chatId, set]) => ({
+    await this.ready();
+    return [...this.chats].map(([chatId, watches]) => ({
       chatId,
-      auctions: [...set].map((key) => this.display.get(key) ?? (key as Address)),
+      auctions: [...watches.values()].map((w) => w.auction),
     }));
   }
-
-  /** The chain an auction was registered on, if recorded. */
   async chainOf(auction: Address): Promise<number | undefined> {
-    await this.load();
-    return this.chainIds.get(normalise(auction));
+    const chains = new Set(
+      (await this.allWatches()).filter((w) => matches(w, auction)).map((w) => w.chainId),
+    );
+    return chains.size === 1 ? [...chains][0] : undefined;
   }
-
-  /** Record a chain learned after the fact (e.g. matched from a store). */
   async setChain(auction: Address, chainId: number): Promise<void> {
-    await this.load();
-    const key = normalise(auction);
-    if (this.chainIds.get(key) === chainId) return;
-    this.chainIds.set(key, chainId);
-    await this.persist();
+    if (!Number.isSafeInteger(chainId) || chainId <= 0) throw new Error("Invalid chain.");
+    await this.change((next) => {
+      for (const watches of next.values()) {
+        for (const [key, watch] of watches) {
+          if (!matches(watch, auction) || watch.chainId !== undefined) continue;
+          watches.delete(key);
+          const updated = { ...watch, chainId };
+          watches.set(keyOf(updated), updated);
+        }
+      }
+    });
   }
-
   async isEmpty(): Promise<boolean> {
-    await this.load();
+    await this.ready();
     return this.chats.size === 0;
   }
 }

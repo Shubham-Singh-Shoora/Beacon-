@@ -1,0 +1,14 @@
+.git
+**/node_modules
+**/.next
+**/dist
+**/.env
+**/.env.*
+**/.vercel
+**/coverage
+**/*.tsbuildinfo
+data/*
+!data/auctions.*.json
+contracts
+.agents
+.codex

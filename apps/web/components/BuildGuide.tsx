@@ -51,8 +51,10 @@ const tools: {
   },
 ];
 
-export function BuildGuide() {
-  const [selected, setSelected] = useState("widget");
+export function BuildGuide({ initialTool = "widget" }: { initialTool?: string }) {
+  const [selected, setSelected] = useState(
+    tools.some((tool) => tool.id === initialTool) ? initialTool : "widget",
+  );
   const tool = tools.find((item) => item.id === selected)!;
   return (
     <div className="build-handbook">
@@ -123,7 +125,10 @@ export function BuildGuide() {
             <Icon name="globe" width="19" height="19" />
             <strong>Mainnets and testnets.</strong>
             <p>Ethereum · Base · Unichain · Arbitrum</p>
-            <small>Plus Sepolia, Base Sepolia and Unichain Sepolia. The examples use the BEACON demo auction on Sepolia.</small>
+            <small>
+              Plus Sepolia, Base Sepolia and Unichain Sepolia. The examples use the BEACON demo
+              auction on Sepolia.
+            </small>
           </div>
           <a
             href={`${REPO}/${tool.path}`}
@@ -507,7 +512,7 @@ function TelegramGuide() {
         label="TELEGRAM BOT"
         title="Take the signal to your chat."
         text="Run your own bot from the repository. Each chat subscribes to auctions independently, while the process uses the same indexed catalogue as the directory."
-        requirements={["Node.js 20.11+", "pnpm 10.23.0", "A BotFather token", "A Telegram chat ID"]}
+        requirements={["Node.js 22+", "pnpm 10.23.0", "A BotFather token", "A persistent worker"]}
       />
       <GuideStep number="01" id="guide-install" title="Set up the workspace and bot">
         <WorkspaceSetup />
@@ -516,34 +521,38 @@ function TelegramGuide() {
           <a href="https://t.me/BotFather" target="_blank" rel="noreferrer">
             @BotFather
           </a>
-          . Open a chat with that bot; for a channel, add the bot with permission to post. Put its
-          token and your target chat ID in the root <code>.env</code>.
+          . Put its token in the root <code>.env</code>. Each user opens the bot and sends
+          <code> /watch</code>; the bot learns their chat ID automatically. Just want to follow
+          auctions? <a href="/telegram">Open the Telegram getting-started guide.</a>
         </p>
         <GuideCode
-          title=".env — replace the two Telegram placeholders"
+          title=".env — configure your worker"
           language="Environment"
-          code={`BEACON_CHAIN_ID=11155111\nBEACON_RPC_URL=${RPC}\nTELEGRAM_BOT_TOKEN=replace_with_botfather_token\nTELEGRAM_CHAT_ID=replace_with_your_chat_id\nBEACON_ALERT_MINUTES_LEFT=15\nBEACON_WATCH_AUCTION_ADDRESS=${AUCTION}`}
+          code={`TELEGRAM_BOT_TOKEN=replace_with_botfather_token\nBEACON_BOT_CHAINS=ethereum,base,unichain,arbitrum,sepolia\nBEACON_RPC_URL_8453=https://base-rpc.publicnode.com\nBEACON_ALERT_MINUTES_LEFT=15\nBEACON_SUBSCRIPTIONS_PATH=data/telegram-subscriptions.json`}
         />
         <p className="guide-caption">
-          The watch address seeds the example subscription at startup. Normal users manage their own
-          subscriptions through <code>/watch</code>. The chat ID is the numeric ID, not a display
-          name.
+          Keep the token on the worker. Use a persistent disk for subscriptions and run one worker
+          per token. A chat ID is needed only for optional one-shot messages or seeded watches.
         </p>
       </GuideStep>
       <GuideStep number="02" id="guide-connect" title="Preview alerts, then start your bot">
         <p>
-          Try a scripted lifecycle in the terminal first. Dry-run mode prints alerts locally and
-          does not send Telegram messages. It still needs an RPC to load auction metadata.
+          Try a complete, fictional auction lifecycle in the terminal. This smoke test needs no
+          credentials, RPC connection, or live auction, and sends no Telegram messages.
         </p>
-        <GuideCode title="Preview the alert flow" code="pnpm bot -- --dry-run --simulate" />
+        <GuideCode title="Preview the alert flow" code="pnpm bot:smoke" />
+        <GuideCode
+          title="Verify your token and webhook configuration (read-only)"
+          code="pnpm bot:check"
+        />
         <p>
           Once your Telegram settings are filled in, start the bot process and leave it running.
         </p>
-        <GuideCode title="Start Telegram delivery" code="pnpm bot" />
+        <GuideCode title="Start Telegram delivery" code="pnpm bot:start" />
         <GuideCode
           title="Send this to your bot in Telegram"
           language="Telegram chat"
-          code={`/watch ${AUCTION}\n/status`}
+          code={`/start\n/ping\n/suggest base\n/watch ${AUCTION} sepolia\n/status`}
         />
       </GuideStep>
       <GuideStep number="03" id="guide-run" title="Know what to expect">
@@ -555,12 +564,17 @@ function TelegramGuide() {
         </Expectation>
         <ReferenceTable
           rows={[
-            ["/watch <address>", "Follow an auction in this chat."],
-            ["/unwatch <address>", "Remove this chat’s subscription."],
+            ["/ping", "Check that the worker is online."],
+            [
+              "/watch <address> <chain>",
+              "Follow an auction on a specific network. Up to 20 per chat.",
+            ],
+            ["/unwatch <address> [chain]", "Remove this chat’s subscription."],
             ["/list", "List the auctions this chat follows."],
             ["/status", "Read the current state of your watched auctions."],
             ["/suggest", "Find candidates from the indexed catalogue."],
             ["/thresholds", "Show the operator-configured alert rules."],
+            ["/chatid", "Show the numeric chat ID for optional operator setup."],
           ]}
         />
       </GuideStep>
@@ -592,10 +606,12 @@ function TelegramGuide() {
           displays them. If new auctions are missing from suggestions, refresh the catalogue from
           the repository root.
         </p>
-        <GuideCode title="Discover new auctions" code="pnpm sync:auctions" />
+        <GuideCode title="Discover new auctions" code="pnpm sync:auctions -- --chain mainnets" />
         <p className="guide-caption">
-          Use a provider that supports log scanning. Keep the bot process running for delivery and
-          retain its subscriptions file across restarts.
+          Use a provider that supports log scanning. Restart the worker after refreshing its
+          catalogue. Deploy it as a long-running process with persistent storage; Vercel hosts the
+          website, while the polling bot needs its own worker. The repository’s bot README includes
+          Docker deployment and recovery commands.
         </p>
       </GuideStep>
     </>
@@ -609,7 +625,11 @@ function AgentGuide() {
         label="BIDDING AGENT"
         title="Understand the decision before it runs."
         text="The command-line agent watches one auction against a configured price cap, bid size, total budget, and bid-count limit. Start by inspecting and simulating; broadcasting is a separate choice."
-        requirements={["Node.js 20.11+", "An RPC for a supported network", "An auction contract address"]}
+        requirements={[
+          "Node.js 20.11+",
+          "An RPC for a supported network",
+          "An auction contract address",
+        ]}
       />
       <GuideStep number="01" id="guide-install" title="Initialize your local configuration">
         <p>

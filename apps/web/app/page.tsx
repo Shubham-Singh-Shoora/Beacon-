@@ -48,7 +48,12 @@ export default async function Home({
   );
   if (sort === "oldest") searched.reverse();
   const preStates: Map<Address, AuctionListState> =
-    filter === "graduated" ? await getListStates(network, searched.map((e) => e.auction)) : new Map();
+    filter === "graduated"
+      ? await getListStates(
+          network,
+          directory.entries.map((e) => e.auction),
+        )
+      : new Map();
   const graduationUnavailable =
     filter === "graduated" && searched.some((entry) => !preStates.has(entry.auction));
   const filtered = searched.filter(
@@ -62,7 +67,12 @@ export default async function Home({
   const current = Math.min(page, totalPages);
   const rows = filtered.slice((current - 1) * PAGE_SIZE, current * PAGE_SIZE);
   const states =
-    filter === "graduated" ? preStates : await getListStates(network, rows.map((e) => e.auction));
+    filter === "graduated"
+      ? preStates
+      : await getListStates(
+          network,
+          rows.map((e) => e.auction),
+        );
   const href = (next: { filter?: Filter; page?: number }) => {
     const sp = new URLSearchParams();
     sp.set("chain", network.slug);
@@ -211,6 +221,15 @@ export default async function Home({
               </p>
             </div>
           )}
+          {directory.indexLagging && (
+            <div className="notice">
+              <Icon name="clock" />
+              <p>
+                The discovery index is catching up. Recently created auctions may be missing;
+                existing auction states are read from the network.
+              </p>
+            </div>
+          )}
           {!directory.isStale && directory.counts.live === 0 && filter === "all" && (
             <div className="directory-note">
               <span className="quiet-dot" /> A little quiet, a lot to discover. Explore completed
@@ -237,7 +256,10 @@ export default async function Home({
                     <div className="token-cell">
                       <TokenAvatar symbol={entry.token.symbol} address={entry.info.token} />
                       <div>
-                        <Link href={`/auction/${entry.auction}?chain=${network.slug}`} className="token-name">
+                        <Link
+                          href={`/auction/${entry.auction}?chain=${network.slug}`}
+                          className="token-name"
+                        >
                           {entry.token.symbol}
                           <Icon name="external" width="14" height="14" />
                         </Link>
@@ -371,6 +393,18 @@ export default async function Home({
               : `Network block ${directory.headBlock.toLocaleString("en-US")}`}
           </div>
         </section>
+        <Link href="/telegram" className="telegram-invitation">
+          <span className="telegram-invitation-icon">
+            <Icon name="sparkles" />
+          </span>
+          <span>
+            <strong>Your next signal, in Telegram.</strong>
+            <span>Follow an auction. Keep up with the moments that matter.</span>
+          </span>
+          <span className="telegram-invitation-link">
+            Explore alerts <Icon name="arrow" />
+          </span>
+        </Link>
         <section className="discovery-banner">
           <div className="banner-art" aria-hidden="true">
             <div />

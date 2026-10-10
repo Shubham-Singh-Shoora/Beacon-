@@ -15,6 +15,7 @@
  * live state from the SDK's read functions.
  */
 import { resolve } from "node:path";
+import { ReadCache } from "./read-cache";
 import {
   createBeaconClient,
   deriveStatus,
@@ -61,20 +62,11 @@ async function withReadDeadline<T>(read: Promise<T>): Promise<T> {
  * the number of auctions shown, not the number of visitors: a burst of page
  * views within one block shares one read. ~15s is about one Ethereum block.
  */
-const LIVE_TTL_MS = 15_000;
-const liveCache = new Map<string, { expires: number; value: Promise<unknown> }>();
+const liveCache = new ReadCache();
 function cachedRead<T>(key: string, read: () => Promise<T>): Promise<T> {
-  const now = Date.now();
-  const hit = liveCache.get(key);
-  if (hit && hit.expires > now) return hit.value as Promise<T>;
-  const value = read();
-  liveCache.set(key, { expires: now + LIVE_TTL_MS, value });
-  // Never cache a failure - the next request should retry.
-  value.catch(() => liveCache.delete(key));
-  if (liveCache.size > 2_000) {
-    for (const [k, v] of liveCache) if (v.expires <= now) liveCache.delete(k);
-  }
-  return value;
+  // The caller deadline does not release the concurrency slot: the underlying
+  // provider request must actually settle before another read can take it.
+  return withReadDeadline(liveCache.get(key, read));
 }
 
 // --- networks ------------------------------------------------------------------
@@ -125,11 +117,17 @@ function storePath(network: NetworkDefaults): string {
   if (process.env.BEACON_STORE_PATH && Number(process.env.BEACON_CHAIN_ID) === network.chainId) {
     return resolve(process.cwd(), process.env.BEACON_STORE_PATH);
   }
-  return resolve(process.cwd(), process.env.BEACON_DATA_DIR ?? "../../data", `auctions.${network.slug}.json`);
+  return resolve(
+    process.cwd(),
+    process.env.BEACON_DATA_DIR ?? "../../data",
+    `auctions.${network.slug}.json`,
+  );
 }
 
 async function readStore(network: NetworkDefaults): Promise<AuctionStoreSnapshot | undefined> {
-  return new JsonAuctionStore(storePath(network)).read();
+  return cachedRead(`store:${network.chainId}`, () =>
+    new JsonAuctionStore(storePath(network)).read(),
+  );
 }
 
 // --- directory -------------------------------------------------------------------
@@ -154,6 +152,7 @@ export interface DirectoryData {
   lastSyncedBlock: bigint;
   /** Whether statuses are based on the stored block while RPC is unavailable. */
   isStale: boolean;
+  indexLagging: boolean;
 }
 
 function toEntry(record: AuctionRecord, headBlock: bigint): DirectoryEntry | null {
@@ -171,7 +170,7 @@ function toEntry(record: AuctionRecord, headBlock: bigint): DirectoryEntry | nul
 
 function headBlockOf(network: NetworkDefaults): Promise<bigint> {
   return cachedRead(`head:${network.chainId}`, () =>
-    withReadDeadline(getClient(network).publicClient.getBlockNumber()),
+    getClient(network).publicClient.getBlockNumber(),
   );
 }
 
@@ -182,7 +181,11 @@ function headBlockOf(network: NetworkDefaults): Promise<bigint> {
  * status. Live state is fetched separately, only for the rows actually shown.
  */
 export async function getDirectory(network: NetworkDefaults): Promise<DirectoryData> {
-  const snapshot = await readStore(network);
+  let storeUnavailable = false;
+  const snapshot = await readStore(network).catch(() => {
+    storeUnavailable = true;
+    return undefined;
+  });
 
   if (!snapshot || snapshot.auctions.length === 0) {
     return {
@@ -192,7 +195,8 @@ export async function getDirectory(network: NetworkDefaults): Promise<DirectoryD
       counts: { all: 0, live: 0, pending: 0, ended: 0, graduated: 0 },
       empty: true,
       lastSyncedBlock: 0n,
-      isStale: false,
+      isStale: storeUnavailable,
+      indexLagging: false,
     };
   }
 
@@ -224,6 +228,8 @@ export async function getDirectory(network: NetworkDefaults): Promise<DirectoryD
     empty: false,
     lastSyncedBlock: snapshot.lastSyncedBlock,
     isStale,
+    indexLagging:
+      !isStale && headBlock - snapshot.lastSyncedBlock > BigInt(network.blocksPerHour * 2),
   };
 }
 
@@ -254,9 +260,7 @@ export async function getListStates(
   if (auctions.length === 0) return new Map();
   try {
     const key = `list:${network.chainId}:${auctions.map((a) => a.toLowerCase()).join(",")}`;
-    return await cachedRead(key, () =>
-      withReadDeadline(getAuctionListStates(getClient(network), auctions)),
-    );
+    return await cachedRead(key, () => getAuctionListStates(getClient(network), auctions));
   } catch {
     // A directory that renders without live numbers beats a 500.
     return new Map();
@@ -302,13 +306,19 @@ export async function getAuctionDetail(
     // Fall back to reading config straight from the chain for an auction the
     // store has not seen yet - a brand new one, or an address typed by hand.
     const summary = await cachedRead(`summary:${network.chainId}:${address.toLowerCase()}`, () =>
-      withReadDeadline(getAuctionSummary(client, address, { info: record?.info, blockNumber: headBlock })),
+      getAuctionSummary(client, address, { info: record?.info, blockNumber: headBlock }),
     );
 
     const { getTokenMetadata } = await import("@hammerock/cca-sdk");
     const [token, currency] = await Promise.all([
-      record?.tokenMeta ?? getTokenMetadata(client, summary.info.token),
-      record?.currencyMeta ?? getTokenMetadata(client, summary.info.currency),
+      record?.tokenMeta ??
+        cachedRead(`token:${network.chainId}:${summary.info.token.toLowerCase()}`, () =>
+          getTokenMetadata(client, summary.info.token),
+        ),
+      record?.currencyMeta ??
+        cachedRead(`token:${network.chainId}:${summary.info.currency.toLowerCase()}`, () =>
+          getTokenMetadata(client, summary.info.currency),
+        ),
     ]);
 
     return {
@@ -334,14 +344,16 @@ export async function getAuctionDetail(
 export async function getLiveState(network: NetworkDefaults, address: Address) {
   return cachedRead(`live:${network.chainId}:${address.toLowerCase()}`, async () => {
     const client = getClient(network);
-    const [state, headBlock] = await withReadDeadline(
-      Promise.all([getAuctionState(client, address), client.publicClient.getBlockNumber()]),
-    );
+    const [state, headBlock] = await Promise.all([
+      getAuctionState(client, address),
+      client.publicClient.getBlockNumber(),
+    ]);
     return { state, headBlock };
   });
 }
 
 export function explorerUrl(network: NetworkDefaults, path: string): string {
-  const base = getClient(network).chain.blockExplorers?.default?.url ?? `https://${network.blockscout}`;
+  const base =
+    getClient(network).chain.blockExplorers?.default?.url ?? `https://${network.blockscout}`;
   return `${base}${path}`;
 }

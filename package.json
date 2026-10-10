@@ -18,6 +18,8 @@
     "web": "pnpm --filter @beacon/web dev",
     "bot": "pnpm --filter @beacon/telegram-bot dev",
     "bot:start": "pnpm --filter @beacon/telegram-bot start",
+    "bot:smoke": "pnpm --filter @beacon/telegram-bot smoke",
+    "bot:check": "pnpm --filter @beacon/telegram-bot check",
     "agent": "pnpm --filter @hammerock/cca-agent cli --env ../../.env",
     "sync:auctions": "pnpm --filter @hammerock/cca-sdk sync",
     "demo:embed": "pnpm --filter @hammerock/cca-widget build && node -e \"require('fs').copyFileSync('packages/widget/dist/mount.global.js','apps/web/public/beacon-widget.js')\"",

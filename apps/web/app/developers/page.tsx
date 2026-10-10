@@ -7,7 +7,12 @@ export const metadata = {
     "Guided setup for the Beacon SDK, React widget, Telegram auction bot, and bidding agent. Start with the first command and connect to real auction data.",
 };
 
-export default function DevelopersPage() {
+export default async function DevelopersPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ tool?: string }>;
+}) {
+  const { tool } = await searchParams;
   return (
     <main id="main-content" className="page-width editorial-page">
       <header className="editorial-hero reveal">
@@ -27,7 +32,7 @@ export default function DevelopersPage() {
           Find your starting point <Icon name="arrow" width="16" height="16" />
         </a>
       </header>
-      <BuildGuide />
+      <BuildGuide initialTool={tool} />
     </main>
   );
 }

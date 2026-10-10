@@ -6,6 +6,7 @@ import { BeaconMark, EthereumMark, Icon } from "./Icons";
 const links = [
   { href: "/", label: "Explore" },
   { href: "/learn", label: "Learn" },
+  { href: "/telegram", label: "Alerts" },
   { href: "/developers", label: "Build" },
 ];
 export function SiteHeader() {
@@ -35,7 +36,10 @@ export function SiteHeader() {
           ))}
         </nav>
         <div className="header-actions">
-          <span className="network-pill" title="Ethereum, Base, Unichain and Arbitrum, plus the Sepolia test network">
+          <span
+            className="network-pill"
+            title="Ethereum, Base, Unichain and Arbitrum, plus the Sepolia test network"
+          >
             <EthereumMark />
             <span>Multichain</span>
             <span className="network-dot" />

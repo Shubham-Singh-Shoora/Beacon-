@@ -7,7 +7,12 @@
 import { NextResponse } from "next/server";
 import { isAddress } from "viem";
 import type { Address } from "viem";
-import { findAuctionNetwork, getLiveState, resolveNetwork } from "@/lib/beacon";
+import {
+  findAuctionNetwork,
+  getLiveState,
+  listedNetworks,
+  resolveNetwork,
+} from "../../../../lib/beacon";
 
 export const dynamic = "force-dynamic";
 
@@ -21,23 +26,37 @@ export async function GET(request: Request, context: { params: Promise<{ address
   try {
     // ?chain=<slug>; without it, the chain whose store holds this auction.
     const chain = new URL(request.url).searchParams.get("chain") ?? undefined;
-    const network = chain ? resolveNetwork(chain) : ((await findAuctionNetwork(address as Address)) ?? resolveNetwork(undefined));
+    if (
+      chain !== undefined &&
+      !listedNetworks().some((network) => network.slug === chain.toLowerCase())
+    ) {
+      return NextResponse.json(
+        { error: "Unsupported network" },
+        { status: 400, headers: { "Cache-Control": "no-store" } },
+      );
+    }
+    const network = chain
+      ? resolveNetwork(chain)
+      : ((await findAuctionNetwork(address as Address)) ?? resolveNetwork(undefined));
     const { state, headBlock } = await getLiveState(network, address as Address);
-    return NextResponse.json({
-      // bigints are not JSON-serializable, so everything crosses as a string.
-      clearingPriceQ96: state.checkpoint.clearingPriceQ96.toString(),
-      cumulativeMps: state.checkpoint.cumulativeMps,
-      currencyRaised: state.currencyRaised.toString(),
-      totalCleared: state.totalCleared.toString(),
-      isGraduated: state.isGraduated,
-      headBlock: headBlock.toString(),
-      chainId: network.chainId,
-      readAt: new Date().toISOString(),
-    });
+    return NextResponse.json(
+      {
+        // bigints are not JSON-serializable, so everything crosses as a string.
+        clearingPriceQ96: state.checkpoint.clearingPriceQ96.toString(),
+        cumulativeMps: state.checkpoint.cumulativeMps,
+        currencyRaised: state.currencyRaised.toString(),
+        totalCleared: state.totalCleared.toString(),
+        isGraduated: state.isGraduated,
+        headBlock: headBlock.toString(),
+        chainId: network.chainId,
+        readAt: new Date().toISOString(),
+      },
+      { headers: { "Cache-Control": "public, max-age=0, s-maxage=10, stale-while-revalidate=20" } },
+    );
   } catch {
     return NextResponse.json(
       { error: "Auction data is temporarily unavailable. Please try again." },
-      { status: 502 },
+      { status: 503, headers: { "Cache-Control": "no-store", "Retry-After": "5" } },
     );
   }
 }

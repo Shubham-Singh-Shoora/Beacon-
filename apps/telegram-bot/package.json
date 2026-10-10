@@ -8,6 +8,8 @@
     "start": "tsx src/index.ts",
     "dry-run": "tsx src/index.ts --dry-run",
     "simulate": "tsx src/index.ts --simulate",
+    "smoke": "tsx src/index.ts --dry-run --simulate --offline",
+    "check": "tsx src/check.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
